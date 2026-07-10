@@ -1,0 +1,6 @@
+.git
+.idea
+.codex_tmp
+**/target
+ruoyi-ui
+*.log
