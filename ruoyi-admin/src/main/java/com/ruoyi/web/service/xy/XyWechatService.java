@@ -1,6 +1,9 @@
 package com.ruoyi.web.service.xy;
 
 import java.util.Map;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
@@ -12,11 +15,17 @@ import com.ruoyi.web.config.XyWechatProperties;
 @Service
 public class XyWechatService
 {
+    private static final Logger log = LoggerFactory.getLogger(XyWechatService.class);
     private static final String SESSION_URL = "https://api.weixin.qq.com/sns/jscode2session?appid={appid}&secret={secret}&js_code={code}&grant_type=authorization_code";
     private final XyWechatProperties properties;
+    private final ObjectMapper objectMapper;
     private final RestTemplate restTemplate = new RestTemplate();
 
-    public XyWechatService(XyWechatProperties properties) { this.properties = properties; }
+    public XyWechatService(XyWechatProperties properties, ObjectMapper objectMapper)
+    {
+        this.properties = properties;
+        this.objectMapper = objectMapper;
+    }
 
     public String[] exchangeCode(String code)
     {
@@ -27,8 +36,9 @@ public class XyWechatService
         }
         try
         {
-            ResponseEntity<Map> response = restTemplate.getForEntity(SESSION_URL, Map.class, properties.getAppId(), properties.getAppSecret(), code);
-            Map body = response.getBody();
+            // 微信 code2session 会以 text/plain 返回 JSON，先读取原文再解析。
+            ResponseEntity<String> response = restTemplate.getForEntity(SESSION_URL, String.class, properties.getAppId(), properties.getAppSecret(), code);
+            Map body = objectMapper.readValue(response.getBody(), Map.class);
             if (body == null || StringUtils.isEmpty((String) body.get("openid")))
             {
                 throw new ServiceException("微信登录失败，请稍后重试");
@@ -41,6 +51,7 @@ public class XyWechatService
         }
         catch (Exception ex)
         {
+            log.error("微信 code2session 调用失败", ex);
             throw new ServiceException("微信登录服务暂不可用，请稍后重试");
         }
     }
