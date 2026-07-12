@@ -163,6 +163,7 @@ CREATE TABLE IF NOT EXISTS xy_product (
   cover_url VARCHAR(500) DEFAULT NULL COMMENT '主图',
   detail_text TEXT DEFAULT NULL COMMENT '详情',
   sale_price DECIMAL(10,2) NOT NULL COMMENT '销售价',
+  member_discount_enabled TINYINT NOT NULL DEFAULT 1 COMMENT '是否参与会员折扣：1参与，0不参与',
   stock INT NOT NULL DEFAULT 0 COMMENT '库存',
   status CHAR(1) NOT NULL DEFAULT '0' COMMENT '状态：0上架，1下架',
   sort_order INT NOT NULL DEFAULT 0 COMMENT '排序',
@@ -196,6 +197,8 @@ CREATE TABLE IF NOT EXISTS xy_order (
   address_id BIGINT DEFAULT NULL COMMENT '地址ID',
   delivery_type VARCHAR(16) NOT NULL COMMENT '配送类型：DELIVERY/PICKUP',
   total_amount DECIMAL(10,2) NOT NULL COMMENT '商品总额',
+  discount_amount DECIMAL(10,2) NOT NULL DEFAULT 0 COMMENT '会员折扣金额',
+  member_discount_rate DECIMAL(5,4) NOT NULL DEFAULT 1.0000 COMMENT '会员折扣率快照',
   freight_amount DECIMAL(10,2) NOT NULL DEFAULT 0 COMMENT '运费',
   payable_amount DECIMAL(10,2) NOT NULL COMMENT '应付金额',
   paid_amount DECIMAL(10,2) NOT NULL DEFAULT 0 COMMENT '实付金额',
@@ -289,6 +292,32 @@ CREATE TABLE IF NOT EXISTS xy_payment (
   KEY idx_xy_payment_member_status (member_id, status),
   CONSTRAINT fk_xy_payment_member FOREIGN KEY (member_id) REFERENCES xy_member(member_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='支付流水';
+
+CREATE TABLE IF NOT EXISTS xy_business_setting (
+  setting_key VARCHAR(64) NOT NULL COMMENT '设置键',
+  setting_value VARCHAR(255) NOT NULL COMMENT '设置值',
+  update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (setting_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='钓虾业务设置';
+
+INSERT INTO xy_business_setting(setting_key, setting_value)
+VALUES ('member_product_discount_rate', '0.95')
+ON DUPLICATE KEY UPDATE setting_value = setting_value;
+
+CREATE TABLE IF NOT EXISTS xy_reservation_notification_record (
+  notification_id BIGINT NOT NULL AUTO_INCREMENT COMMENT '通知记录ID',
+  reservation_id BIGINT NOT NULL COMMENT '预约ID',
+  reminder_type VARCHAR(24) NOT NULL COMMENT '提醒类型：DAY_BEFORE/TWO_HOURS',
+  scheduled_for DATETIME NOT NULL COMMENT '计划发送时间',
+  status VARCHAR(16) NOT NULL DEFAULT 'PENDING' COMMENT '状态：PENDING/SENT/FAILED',
+  error_message VARCHAR(500) DEFAULT NULL COMMENT '失败原因',
+  sent_time DATETIME DEFAULT NULL COMMENT '实际发送时间',
+  create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (notification_id),
+  UNIQUE KEY uk_xy_reservation_notification (reservation_id, reminder_type),
+  KEY idx_xy_reservation_notification_status (status, scheduled_for),
+  CONSTRAINT fk_xy_reservation_notification_reservation FOREIGN KEY (reservation_id) REFERENCES xy_reservation(reservation_id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='预约订阅消息发送记录';
 
 -- 后台菜单：通过若依动态路由加载，禁止把运营页面放在前端匿名白名单中。
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, `query`, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark)

@@ -104,6 +104,10 @@ xy:
   wechat:
     app-id: ${XY_WECHAT_APP_ID:}
     app-secret: ${XY_WECHAT_APP_SECRET:}
+    subscribe-reservation-template-id: ${XY_WECHAT_SUBSCRIBE_RESERVATION_TEMPLATE_ID:}
+    subscribe-reservation-page: ${XY_WECHAT_SUBSCRIBE_RESERVATION_PAGE:pages/reserve/history}
+    subscribe-reservation-title-field: ${XY_WECHAT_SUBSCRIBE_RESERVATION_TITLE_FIELD:thing1}
+    subscribe-reservation-time-field: ${XY_WECHAT_SUBSCRIBE_RESERVATION_TIME_FIELD:time2}
   wechat-pay:
     mch-id: ${XY_WECHAT_PAY_MCH_ID:}
     merchant-serial-no: ${XY_WECHAT_PAY_SERIAL_NO:}

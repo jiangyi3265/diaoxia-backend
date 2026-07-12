@@ -57,7 +57,18 @@ public class XyAppController
 
     @Anonymous
     @GetMapping("/products")
-    public AjaxResult products(Long productId) { return AjaxResult.success(service.listProducts(productId)); }
+    public AjaxResult products(Long productId, @RequestHeader(value = "X-App-Token", required = false) String token)
+    {
+        return AjaxResult.success(service.listProducts(productId, service.optionalMember(token)));
+    }
+    @Anonymous
+    @GetMapping("/notification-settings")
+    public AjaxResult notificationSettings()
+    {
+        Map<String, Object> result = new HashMap<>();
+        result.put("reservationReminderTemplateId", wechatService.getReservationReminderTemplateId());
+        return AjaxResult.success(result);
+    }
 
     @Anonymous
     @GetMapping("/stores/{storeId}/availability")

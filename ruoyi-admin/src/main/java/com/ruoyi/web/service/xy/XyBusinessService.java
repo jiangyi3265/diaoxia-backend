@@ -1,9 +1,11 @@
 package com.ruoyi.web.service.xy;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.security.SecureRandom;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -31,6 +33,8 @@ public class XyBusinessService
 {
     private static final String MEMBER_TOKEN_PREFIX = "xy:member:token:";
     private static final String MEMBER_VERIFY_PREFIX = "xy:member:verify:";
+    private static final String MEMBER_PRODUCT_DISCOUNT_RATE_KEY = "member_product_discount_rate";
+    private static final BigDecimal DEFAULT_MEMBER_PRODUCT_DISCOUNT_RATE = new BigDecimal("0.95");
     private static final DateTimeFormatter NO_TIME = DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS");
     private static final SecureRandom RANDOM = new SecureRandom();
 
@@ -89,6 +93,17 @@ public class XyBusinessService
         return memberId;
     }
 
+    /** 商品浏览可匿名进行；存在有效小程序会话时才计算会员价。 */
+    public Long optionalMember(String memberToken)
+    {
+        if (StringUtils.isEmpty(memberToken)) return null;
+        Long memberId = redisCache.getCacheObject(MEMBER_TOKEN_PREFIX + memberToken);
+        if (memberId == null) return null;
+        Integer enabled = jdbcTemplate.queryForObject("select count(1) from xy_member where member_id=? and status='0'",
+                Integer.class, memberId);
+        return enabled != null && enabled > 0 ? memberId : null;
+    }
+
     /** 供微信 code2session 成功后建立安全会话。 */
     @Transactional
     public Map<String, Object> loginByOpenId(String openid, String unionid)
@@ -143,9 +158,9 @@ public class XyBusinessService
         return cards.isEmpty() ? null : cards.get(0);
     }
 
-    public List<Map<String, Object>> listProducts(Long productId)
+    public List<Map<String, Object>> listProducts(Long productId, Long memberId)
     {
-        String sql = "select product_id as productId, product_name as productName, category_name as categoryName, cover_url as coverUrl, detail_text as detailText, sale_price as salePrice, stock from xy_product where status = '0'";
+        String sql = "select product_id as productId, product_name as productName, category_name as categoryName, cover_url as coverUrl, detail_text as detailText, sale_price as salePrice, member_discount_enabled as memberDiscountEnabled, stock from xy_product where status = '0'";
         List<Object> args = new ArrayList<>();
         if (productId != null)
         {
@@ -153,7 +168,62 @@ public class XyBusinessService
             args.add(productId);
         }
         sql += " order by sort_order asc, product_id desc";
-        return jdbcTemplate.queryForList(sql, args.toArray());
+        List<Map<String, Object>> products = jdbcTemplate.queryForList(sql, args.toArray());
+        boolean activeMember = memberId != null && currentCard(memberId) != null;
+        BigDecimal rate = activeMember ? memberProductDiscountRate() : BigDecimal.ONE;
+        for (Map<String, Object> product : products)
+        {
+            BigDecimal originalPrice = new BigDecimal(product.get("salePrice").toString());
+            boolean eligible = isMemberDiscountEnabled(product.get("memberDiscountEnabled"));
+            BigDecimal memberPrice = activeMember && eligible ? originalPrice.multiply(rate).setScale(2, RoundingMode.HALF_UP) : originalPrice;
+            product.put("memberDiscountEligible", eligible);
+            product.put("memberDiscountRate", activeMember && eligible ? rate : BigDecimal.ONE);
+            product.put("memberPrice", memberPrice);
+            product.put("memberDiscountAmount", originalPrice.subtract(memberPrice));
+        }
+        return products;
+    }
+
+    public Map<String, Object> memberDiscountSettings()
+    {
+        Map<String, Object> result = new HashMap<>();
+        BigDecimal rate = memberProductDiscountRate();
+        result.put("discountRate", rate);
+        result.put("discountLabel", rate.multiply(BigDecimal.TEN).stripTrailingZeros().toPlainString() + "折");
+        return result;
+    }
+
+    @Transactional
+    public void saveMemberDiscountSettings(Map<String, Object> input)
+    {
+        BigDecimal rate = decimal(input.get("discountRate"), "会员折扣率不合法");
+        if (rate.compareTo(new BigDecimal("0.01")) < 0 || rate.compareTo(BigDecimal.ONE) > 0)
+        {
+            throw new ServiceException("会员折扣率必须在 0.01 到 1 之间");
+        }
+        jdbcTemplate.update("insert into xy_business_setting(setting_key,setting_value) values(?,?) on duplicate key update setting_value=values(setting_value)",
+                MEMBER_PRODUCT_DISCOUNT_RATE_KEY, rate.stripTrailingZeros().toPlainString());
+    }
+
+    private BigDecimal memberProductDiscountRate()
+    {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("select setting_value from xy_business_setting where setting_key=?",
+                MEMBER_PRODUCT_DISCOUNT_RATE_KEY);
+        if (rows.isEmpty()) return DEFAULT_MEMBER_PRODUCT_DISCOUNT_RATE;
+        try
+        {
+            BigDecimal rate = new BigDecimal(String.valueOf(rows.get(0).get("setting_value")));
+            return rate.compareTo(BigDecimal.ZERO) > 0 && rate.compareTo(BigDecimal.ONE) <= 0 ? rate : DEFAULT_MEMBER_PRODUCT_DISCOUNT_RATE;
+        }
+        catch (Exception ex)
+        {
+            return DEFAULT_MEMBER_PRODUCT_DISCOUNT_RATE;
+        }
+    }
+
+    private boolean isMemberDiscountEnabled(Object value)
+    {
+        return value instanceof Number ? ((Number) value).intValue() == 1 : "1".equals(String.valueOf(value));
     }
 
     public List<Map<String, Object>> listStores()
@@ -170,8 +240,15 @@ public class XyBusinessService
     {
         Map<String, Object> result = new HashMap<>();
         result.put("date", reservationDate.toString());
-        result.put("slots", jdbcTemplate.queryForList("select s.slot_id as slotId, date_format(s.start_time, '%H:%i') as startTime, date_format(s.end_time, '%H:%i') as endTime, (select count(1) from xy_reservation r where r.slot_id = s.slot_id and r.reservation_date = ? and r.seat_lock = 1) as bookedCount, (select count(1) from xy_seat se where se.store_id = s.store_id and se.status = '0') as totalCount from xy_reservation_slot s where s.store_id = ? and s.status = '0' order by s.sort_order, s.start_time", reservationDate, storeId));
+        List<Map<String, Object>> slots = jdbcTemplate.queryForList("select s.slot_id as slotId, date_format(s.start_time, '%H:%i') as startTime, date_format(s.end_time, '%H:%i') as endTime, (select count(1) from xy_reservation r where r.slot_id = s.slot_id and r.reservation_date = ? and r.seat_lock = 1) as bookedCount, (select count(1) from xy_seat se where se.store_id = s.store_id and se.status = '0') as totalCount from xy_reservation_slot s where s.store_id = ? and s.status = '0' order by s.sort_order, s.start_time", reservationDate, storeId);
+        for (Map<String, Object> slot : slots)
+        {
+            boolean bookable = !reservationDate.equals(LocalDate.now()) || LocalTime.now().isBefore(LocalTime.parse(String.valueOf(slot.get("startTime"))));
+            slot.put("bookable", bookable);
+        }
+        result.put("slots", slots);
         result.put("seats", jdbcTemplate.queryForList("select se.seat_id as seatId, se.seat_code as seatCode, se.zone_name as zoneName, coalesce(group_concat(r.slot_id), '') as bookedSlotIds from xy_seat se left join xy_reservation r on r.seat_id=se.seat_id and r.reservation_date=? and r.seat_lock=1 where se.store_id=? and se.status='0' group by se.seat_id, se.seat_code, se.zone_name, se.sort_order order by se.sort_order, se.seat_code", reservationDate, storeId));
+        result.put("sameDayRolloverRule", "完成到店签到后，可在本人当日场次结束前10分钟起追加预约当日后续有空位时段");
         return result;
     }
 
@@ -187,15 +264,22 @@ public class XyBusinessService
         {
             throw new ServiceException("请先开通有效会员卡");
         }
+        List<Map<String, Object>> slotRows = jdbcTemplate.queryForList("select start_time,end_time from xy_reservation_slot where slot_id=? and store_id=? and status='0'", slotId, storeId);
+        if (slotRows.isEmpty()) throw new ServiceException("选择的时段不可用");
+        LocalTime targetStart = ((java.sql.Time) slotRows.get(0).get("start_time")).toLocalTime();
+        if (reservationDate.equals(LocalDate.now()) && !LocalTime.now().isBefore(targetStart))
+        {
+            throw new ServiceException("当天只能预约尚未开始的时段");
+        }
         Integer dailyLimit = ((Number) card.get("dailyReservationLimit")).intValue();
         Integer used = jdbcTemplate.queryForObject("select count(1) from xy_reservation where member_id = ? and reservation_date = ? and seat_lock = 1", Integer.class, memberId, reservationDate);
-        if (used != null && used >= dailyLimit)
+        boolean rolloverAllowed = hasSameDayRolloverPrivilege(memberId, reservationDate);
+        if (used != null && used >= dailyLimit && !rolloverAllowed)
         {
-            throw new ServiceException("该会员当天预约次数已达上限");
+            throw new ServiceException("该会员当天预约次数已达上限；完成签到后仅可在本人场次结束前10分钟追加预约当日后续时段");
         }
-        Integer validSlot = jdbcTemplate.queryForObject("select count(1) from xy_reservation_slot where slot_id = ? and store_id = ? and status = '0'", Integer.class, slotId, storeId);
         Integer validSeat = jdbcTemplate.queryForObject("select count(1) from xy_seat where seat_id = ? and store_id = ? and status = '0'", Integer.class, seatId, storeId);
-        if (validSlot == null || validSlot == 0 || validSeat == null || validSeat == 0)
+        if (validSeat == null || validSeat == 0)
         {
             throw new ServiceException("选择的时段或座位不可用");
         }
@@ -213,6 +297,17 @@ public class XyBusinessService
         return reservationDetail(memberId, reservationNo);
     }
 
+    /** 签到会员在本人场次结束前 10 分钟，可忽略套餐日预约上限追加当日后续空位。 */
+    private boolean hasSameDayRolloverPrivilege(Long memberId, LocalDate reservationDate)
+    {
+        if (!LocalDate.now().equals(reservationDate)) return false;
+        Integer count = jdbcTemplate.queryForObject(
+                "select count(1) from xy_reservation r join xy_reservation_slot s on s.slot_id=r.slot_id "
+                        + "where r.member_id=? and r.reservation_date=curdate() and r.status='CHECKED_IN' "
+                        + "and curtime()>=subtime(s.end_time,'00:10:00') and curtime()<s.end_time",
+                Integer.class, memberId);
+        return count != null && count > 0;
+    }
     public List<Map<String, Object>> memberReservations(Long memberId)
     {
         return jdbcTemplate.queryForList("select r.reservation_id as reservationId, r.reservation_no as reservationNo, r.reservation_date as reservationDate, r.status, r.verify_code as verifyCode, date_format(s.start_time, '%H:%i') as startTime, date_format(s.end_time, '%H:%i') as endTime, se.seat_code as seatCode, se.zone_name as zoneName, st.store_name as storeName from xy_reservation r join xy_reservation_slot s on s.slot_id = r.slot_id join xy_seat se on se.seat_id = r.seat_id join xy_store st on st.store_id = r.store_id where r.member_id = ? order by r.reservation_date desc, s.start_time desc", memberId);
@@ -281,7 +376,7 @@ public class XyBusinessService
         String deliveryType = required(input, "deliveryType", "请指定配送方式");
         if (productId == null || quantity < 1 || quantity > 99) throw new ServiceException("商品数量不合法");
         if (!"DELIVERY".equals(deliveryType) && !"PICKUP".equals(deliveryType)) throw new ServiceException("配送方式不合法");
-        List<Map<String, Object>> products = jdbcTemplate.queryForList("select product_id, product_name, cover_url, sale_price, stock from xy_product where product_id = ? and status = '0' for update", productId);
+        List<Map<String, Object>> products = jdbcTemplate.queryForList("select product_id, product_name, cover_url, sale_price, member_discount_enabled, stock from xy_product where product_id = ? and status = '0' for update", productId);
         if (products.isEmpty()) throw new ServiceException("商品已下架或不存在");
         Map<String, Object> product = products.get(0);
         int stock = ((Number) product.get("stock")).intValue();
@@ -296,15 +391,20 @@ public class XyBusinessService
             snapshot = address.get("receiver_name") + " " + address.get("receiver_mobile") + " " + address.get("province") + address.get("city") + address.get("district") + address.get("detail");
         }
         BigDecimal salePrice = new BigDecimal(product.get("sale_price").toString());
+        boolean memberDiscount = currentCard(memberId) != null && isMemberDiscountEnabled(product.get("member_discount_enabled"));
+        BigDecimal memberRate = memberDiscount ? memberProductDiscountRate() : BigDecimal.ONE;
+        BigDecimal unitPrice = memberDiscount ? salePrice.multiply(memberRate).setScale(2, RoundingMode.HALF_UP) : salePrice;
         BigDecimal total = salePrice.multiply(BigDecimal.valueOf(quantity));
+        BigDecimal discountedTotal = unitPrice.multiply(BigDecimal.valueOf(quantity));
+        BigDecimal discount = total.subtract(discountedTotal);
         BigDecimal freight = BigDecimal.ZERO;
-        BigDecimal payable = total.add(freight);
+        BigDecimal payable = discountedTotal.add(freight);
         String orderNo = nextNo("OD");
         int reduced = jdbcTemplate.update("update xy_product set stock = stock - ? where product_id = ? and stock >= ?", quantity, productId, quantity);
         if (reduced != 1) throw new ServiceException("商品库存不足，请刷新后重试");
-        jdbcTemplate.update("insert into xy_order(order_no, member_id, address_id, delivery_type, total_amount, freight_amount, payable_amount, receiver_snapshot) values (?, ?, ?, ?, ?, ?, ?, ?)", orderNo, memberId, addressId, deliveryType, total, freight, payable, snapshot);
+        jdbcTemplate.update("insert into xy_order(order_no, member_id, address_id, delivery_type, total_amount, discount_amount, member_discount_rate, freight_amount, payable_amount, receiver_snapshot) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", orderNo, memberId, addressId, deliveryType, total, discount, memberRate, freight, payable, snapshot);
         Long orderId = jdbcTemplate.queryForObject("select last_insert_id()", Long.class);
-        jdbcTemplate.update("insert into xy_order_item(order_id, product_id, product_name, cover_url, sale_price, quantity, subtotal_amount) values (?, ?, ?, ?, ?, ?, ?)", orderId, productId, product.get("product_name"), product.get("cover_url"), salePrice, quantity, total);
+        jdbcTemplate.update("insert into xy_order_item(order_id, product_id, product_name, cover_url, sale_price, quantity, subtotal_amount) values (?, ?, ?, ?, ?, ?, ?)", orderId, productId, product.get("product_name"), product.get("cover_url"), unitPrice, quantity, discountedTotal);
         return orderDetail(memberId, orderNo);
     }
 
@@ -315,7 +415,7 @@ public class XyBusinessService
 
     public Map<String, Object> orderDetail(Long memberId, String orderNo)
     {
-        List<Map<String, Object>> orders = jdbcTemplate.queryForList("select order_id as orderId, order_no as orderNo, delivery_type as deliveryType, total_amount as totalAmount, freight_amount as freightAmount, payable_amount as payableAmount, paid_amount as paidAmount, status, receiver_snapshot as receiverSnapshot, create_time as createTime from xy_order where member_id = ? and order_no = ?", memberId, orderNo);
+        List<Map<String, Object>> orders = jdbcTemplate.queryForList("select order_id as orderId, order_no as orderNo, delivery_type as deliveryType, total_amount as totalAmount, discount_amount as discountAmount, member_discount_rate as memberDiscountRate, freight_amount as freightAmount, payable_amount as payableAmount, paid_amount as paidAmount, status, receiver_snapshot as receiverSnapshot, create_time as createTime from xy_order where member_id = ? and order_no = ?", memberId, orderNo);
         if (orders.isEmpty()) throw new ServiceException("订单不存在");
         Map<String, Object> order = orders.get(0);
         order.put("items", jdbcTemplate.queryForList("select product_id as productId, product_name as productName, cover_url as coverUrl, sale_price as salePrice, quantity, subtotal_amount as subtotalAmount from xy_order_item where order_id = ?", order.get("orderId")));
@@ -409,7 +509,7 @@ public class XyBusinessService
 
     public List<Map<String, Object>> adminProducts()
     {
-        return jdbcTemplate.queryForList("select product_id as productId, product_name as productName, category_name as categoryName, cover_url as coverUrl, detail_text as detailText, sale_price as salePrice, stock, status, sort_order as sortOrder from xy_product order by sort_order, product_id desc");
+        return jdbcTemplate.queryForList("select product_id as productId, product_name as productName, category_name as categoryName, cover_url as coverUrl, detail_text as detailText, sale_price as salePrice, member_discount_enabled as memberDiscountEnabled, stock, status, sort_order as sortOrder from xy_product order by sort_order, product_id desc");
     }
 
     @Transactional
@@ -424,15 +524,16 @@ public class XyBusinessService
         BigDecimal salePrice = decimal(input.get("salePrice"), "销售价不合法");
         Integer stock = number(input.get("stock")) == null ? 0 : number(input.get("stock")).intValue();
         if (salePrice.signum() <= 0 || stock < 0) throw new ServiceException("商品价格或库存不合法");
+        int memberDiscountEnabled = Boolean.FALSE.equals(input.get("memberDiscountEnabled")) || "0".equals(String.valueOf(input.get("memberDiscountEnabled"))) ? 0 : 1;
         Long productId = number(input.get("productId"));
         String status = "1".equals(String.valueOf(input.get("status"))) ? "1" : "0";
         int sortOrder = number(input.get("sortOrder")) == null ? 0 : number(input.get("sortOrder")).intValue();
         if (productId == null)
         {
-            jdbcTemplate.update("insert into xy_product(product_name, category_name, cover_url, detail_text, sale_price, stock, status, sort_order) values (?, ?, ?, ?, ?, ?, ?, ?)", productName, categoryName, coverUrl, detailText, salePrice, stock, status, sortOrder);
+            jdbcTemplate.update("insert into xy_product(product_name, category_name, cover_url, detail_text, sale_price, member_discount_enabled, stock, status, sort_order) values (?, ?, ?, ?, ?, ?, ?, ?, ?)", productName, categoryName, coverUrl, detailText, salePrice, memberDiscountEnabled, stock, status, sortOrder);
             return jdbcTemplate.queryForObject("select last_insert_id()", Long.class);
         }
-        int count = jdbcTemplate.update("update xy_product set product_name=?, category_name=?, cover_url=?, detail_text=?, sale_price=?, stock=?, status=?, sort_order=? where product_id=?", productName, categoryName, coverUrl, detailText, salePrice, stock, status, sortOrder, productId);
+        int count = jdbcTemplate.update("update xy_product set product_name=?, category_name=?, cover_url=?, detail_text=?, sale_price=?, member_discount_enabled=?, stock=?, status=?, sort_order=? where product_id=?", productName, categoryName, coverUrl, detailText, salePrice, memberDiscountEnabled, stock, status, sortOrder, productId);
         if (count != 1) throw new ServiceException("商品不存在");
         return productId;
     }
@@ -452,7 +553,7 @@ public class XyBusinessService
         return jdbcTemplate.queryForList("select p.payment_no as paymentNo, p.business_type as businessType, p.amount, p.channel, p.status, p.transaction_id as transactionId, p.paid_time as paidTime, p.create_time as createTime, m.nickname, m.mobile from xy_payment p join xy_member m on m.member_id=p.member_id order by p.create_time desc");
     }
 
-    public List<Map<String,Object>> adminOrders(){return jdbcTemplate.queryForList("select o.order_id as orderId,o.order_no as orderNo,o.delivery_type as deliveryType,o.payable_amount as payableAmount,o.paid_amount as paidAmount,o.status,o.create_time as createTime,m.nickname,m.mobile from xy_order o join xy_member m on m.member_id=o.member_id order by o.create_time desc");}
+    public List<Map<String,Object>> adminOrders(){return jdbcTemplate.queryForList("select o.order_id as orderId,o.order_no as orderNo,o.delivery_type as deliveryType,o.total_amount as totalAmount,o.discount_amount as discountAmount,o.member_discount_rate as memberDiscountRate,o.payable_amount as payableAmount,o.paid_amount as paidAmount,o.status,o.create_time as createTime,m.nickname,m.mobile from xy_order o join xy_member m on m.member_id=o.member_id order by o.create_time desc");}
     @Transactional public void shipOrder(String orderNo){int count=jdbcTemplate.update("update xy_order set status='SHIPPED',shipped_time=now() where order_no=? and status='PAID'",orderNo);if(count!=1)throw new ServiceException("当前订单不能发货");}
     public List<Map<String,Object>> adminAfterSales(){return jdbcTemplate.queryForList("select a.after_sale_no as afterSaleNo,a.reason,a.description_text as description,a.status,a.refund_no as refundNo,a.refund_id as refundId,a.create_time as createTime,o.order_no as orderNo,o.paid_amount as paidAmount,m.nickname,m.mobile from xy_after_sale a join xy_order o on o.order_id=a.order_id join xy_member m on m.member_id=a.member_id order by a.create_time desc");}
     public void rejectAfterSale(String afterSaleNo){int count=jdbcTemplate.update("update xy_after_sale set status='REJECTED' where after_sale_no=? and status='PENDING'",afterSaleNo);if(count!=1)throw new ServiceException("售后单当前不能拒绝");}

@@ -70,6 +70,10 @@ public class XyAdminController
 
     @PreAuthorize("@ss.hasPermi('xy:product:list')")
     @GetMapping("/products") public AjaxResult products() { return AjaxResult.success(service.adminProducts()); }
+    @PreAuthorize("@ss.hasPermi('xy:product:list')")
+    @GetMapping("/member-discount-settings") public AjaxResult memberDiscountSettings() { return AjaxResult.success(service.memberDiscountSettings()); }
+    @PreAuthorize("@ss.hasPermi('xy:product:edit')")
+    @PutMapping("/member-discount-settings") public AjaxResult updateMemberDiscountSettings(@RequestBody Map<String, Object> body) { service.saveMemberDiscountSettings(body); return AjaxResult.success(); }
 
     @PreAuthorize("@ss.hasPermi('xy:product:edit')")
     @PostMapping("/products") public AjaxResult createProduct(@RequestBody Map<String, Object> body) { return AjaxResult.success(service.saveProduct(body)); }

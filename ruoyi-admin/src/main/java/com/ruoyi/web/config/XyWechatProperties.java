@@ -10,9 +10,21 @@ public class XyWechatProperties
 {
     private String appId;
     private String appSecret;
+    private String subscribeReservationTemplateId;
+    private String subscribeReservationPage = "pages/reserve/history";
+    private String subscribeReservationTitleField = "thing1";
+    private String subscribeReservationTimeField = "time2";
 
     public String getAppId() { return appId; }
     public void setAppId(String appId) { this.appId = appId; }
     public String getAppSecret() { return appSecret; }
     public void setAppSecret(String appSecret) { this.appSecret = appSecret; }
+    public String getSubscribeReservationTemplateId() { return subscribeReservationTemplateId; }
+    public void setSubscribeReservationTemplateId(String subscribeReservationTemplateId) { this.subscribeReservationTemplateId = subscribeReservationTemplateId; }
+    public String getSubscribeReservationPage() { return subscribeReservationPage; }
+    public void setSubscribeReservationPage(String subscribeReservationPage) { this.subscribeReservationPage = subscribeReservationPage; }
+    public String getSubscribeReservationTitleField() { return subscribeReservationTitleField; }
+    public void setSubscribeReservationTitleField(String subscribeReservationTitleField) { this.subscribeReservationTitleField = subscribeReservationTitleField; }
+    public String getSubscribeReservationTimeField() { return subscribeReservationTimeField; }
+    public void setSubscribeReservationTimeField(String subscribeReservationTimeField) { this.subscribeReservationTimeField = subscribeReservationTimeField; }
 }
