@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -23,7 +24,11 @@ import com.ruoyi.common.exception.ServiceException;
  * 商城、预约、会员和核销的真实数据库/Redis集成测试。
  * 测试数据由事务自动回滚，Redis会话在结束时显式清除。
  */
-@SpringBootTest(classes = RuoYiApplication.class, webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@SpringBootTest(
+        classes = RuoYiApplication.class,
+        webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
+        properties = "TOKEN_SECRET=integration-test-token-secret-at-least-32-bytes")
+@EnabledIfEnvironmentVariable(named = "RUN_XY_INTEGRATION_TESTS", matches = "true")
 @Transactional
 class XyBusinessFlowIntegrationTest
 {
