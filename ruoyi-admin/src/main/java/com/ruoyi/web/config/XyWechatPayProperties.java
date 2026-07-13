@@ -8,6 +8,8 @@ import org.springframework.stereotype.Component;
 @ConfigurationProperties(prefix = "xy.wechat-pay")
 public class XyWechatPayProperties
 {
+    /** 没有微信商户号时用于完整演示业务流程，生产接入支付后必须关闭。 */
+    private boolean demoEnabled;
     private String mchId;
     private String merchantSerialNo;
     private String privateKeyPath;
@@ -17,6 +19,8 @@ public class XyWechatPayProperties
     private String apiV3Key;
     private String platformCertificatePath;
 
+    public boolean isDemoEnabled() { return demoEnabled; }
+    public void setDemoEnabled(boolean demoEnabled) { this.demoEnabled = demoEnabled; }
     public String getMchId() { return mchId; }
     public void setMchId(String mchId) { this.mchId = mchId; }
     public String getMerchantSerialNo() { return merchantSerialNo; }

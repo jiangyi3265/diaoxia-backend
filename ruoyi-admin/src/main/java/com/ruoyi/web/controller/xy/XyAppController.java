@@ -71,6 +71,16 @@ public class XyAppController
     }
 
     @Anonymous
+    @GetMapping("/payment-settings")
+    public AjaxResult paymentSettings()
+    {
+        Map<String, Object> result = new HashMap<>();
+        result.put("demoEnabled", wechatPayService.isDemoEnabled());
+        result.put("mode", wechatPayService.isDemoEnabled() ? "DEMO" : "WECHAT");
+        return AjaxResult.success(result);
+    }
+
+    @Anonymous
     @GetMapping("/stores/{storeId}/availability")
     public AjaxResult availability(@PathVariable Long storeId, String date)
     {

@@ -53,6 +53,11 @@ public class XyWechatPayService
         this.http = new RestTemplate(factory);
     }
 
+    public boolean isDemoEnabled()
+    {
+        return properties.isDemoEnabled();
+    }
+
     public Map<String, Object> jsapi(String orderNo, String openid, int amountFen)
     {
         return jsapi(orderNo, openid, amountFen, "钓虾商城订单");
