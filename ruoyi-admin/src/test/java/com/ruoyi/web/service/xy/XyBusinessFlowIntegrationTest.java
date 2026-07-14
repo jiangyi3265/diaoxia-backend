@@ -88,6 +88,8 @@ class XyBusinessFlowIntegrationTest
 
         LocalDate tomorrow = LocalDate.now().plusDays(1);
         Map<String, Object> firstReservation = service.createReservation(memberId, storeId, slotId, seatId, tomorrow);
+        assertThrows(ServiceException.class, () -> service.createReservation(memberId, storeId, slotId, seatId, tomorrow));
+        assertThrows(ServiceException.class, () -> service.createReservation(memberId, storeId, slotId, seatId, tomorrow.plusDays(1)));
         service.cancelReservation(memberId, String.valueOf(firstReservation.get("reservationNo")));
         Map<String, Object> secondReservation = service.createReservation(memberId, storeId, slotId, seatId, tomorrow);
         service.cancelReservation(memberId, String.valueOf(secondReservation.get("reservationNo")));

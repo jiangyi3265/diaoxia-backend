@@ -250,7 +250,7 @@ public class XyBusinessService
         }
         result.put("slots", slots);
         result.put("seats", jdbcTemplate.queryForList("select se.seat_id as seatId, se.seat_code as seatCode, se.zone_name as zoneName, coalesce(group_concat(r.slot_id), '') as bookedSlotIds from xy_seat se left join xy_reservation r on r.seat_id=se.seat_id and r.reservation_date=? and r.seat_lock=1 where se.store_id=? and se.status='0' group by se.seat_id, se.seat_code, se.zone_name, se.sort_order order by se.sort_order, se.seat_code", reservationDate, storeId));
-        result.put("sameDayRolloverRule", "完成到店签到后，可在本人当日场次结束前10分钟起追加预约当日后续有空位时段");
+        result.put("sameDayRolloverRule", "每位会员同时只能保留1个待到场预约；到店签到后，自当前场次结束前10分钟起，可不限次续约当天更晚的空余时段");
         return result;
     }
 
@@ -266,6 +266,8 @@ public class XyBusinessService
         {
             throw new ServiceException("请先开通有效会员卡");
         }
+        // 串行化同一会员的预约请求，防止连续点击或并发请求绕过单预约限制。
+        jdbcTemplate.queryForObject("select member_id from xy_member where member_id=? for update", Long.class, memberId);
         List<Map<String, Object>> slotRows = jdbcTemplate.queryForList("select start_time,end_time from xy_reservation_slot where slot_id=? and store_id=? and status='0'", slotId, storeId);
         if (slotRows.isEmpty()) throw new ServiceException("选择的时段不可用");
         LocalTime targetStart = ((java.sql.Time) slotRows.get(0).get("start_time")).toLocalTime();
@@ -273,9 +275,31 @@ public class XyBusinessService
         {
             throw new ServiceException("当天只能预约尚未开始的时段");
         }
+        Integer duplicate = jdbcTemplate.queryForObject(
+                "select count(1) from xy_reservation where member_id=? and reservation_date=? and slot_id=? and status in ('BOOKED','CHECKED_IN')",
+                Integer.class, memberId, reservationDate, slotId);
+        if (duplicate != null && duplicate > 0)
+        {
+            throw new ServiceException("你已预约该时段，不能重复预约");
+        }
+        Integer pendingBooked = jdbcTemplate.queryForObject(
+                "select count(1) from xy_reservation where member_id=? and status='BOOKED' and reservation_date>=curdate()",
+                Integer.class, memberId);
+        if (pendingBooked != null && pendingBooked > 0)
+        {
+            throw new ServiceException("你已有一条待到场预约，每次只能预约一个场次；到店签到后可按规则续约当天后续时段");
+        }
+        Integer checkedInToday = jdbcTemplate.queryForObject(
+                "select count(1) from xy_reservation where member_id=? and status='CHECKED_IN' and reservation_date=curdate()",
+                Integer.class, memberId);
+        boolean rolloverAllowed = checkedInToday != null && checkedInToday > 0
+                && hasSameDayRolloverPrivilege(memberId, reservationDate, targetStart);
+        if (checkedInToday != null && checkedInToday > 0 && !rolloverAllowed)
+        {
+            throw new ServiceException("你已签到当前场次，请在场次结束前10分钟起预约当天更晚的空余时段");
+        }
         Integer dailyLimit = ((Number) card.get("dailyReservationLimit")).intValue();
         Integer used = jdbcTemplate.queryForObject("select count(1) from xy_reservation where member_id = ? and reservation_date = ? and seat_lock = 1", Integer.class, memberId, reservationDate);
-        boolean rolloverAllowed = hasSameDayRolloverPrivilege(memberId, reservationDate);
         if (used != null && used >= dailyLimit && !rolloverAllowed)
         {
             throw new ServiceException("该会员当天预约次数已达上限；完成签到后仅可在本人场次结束前10分钟追加预约当日后续时段");
@@ -299,16 +323,18 @@ public class XyBusinessService
         return reservationDetail(memberId, reservationNo);
     }
 
-    /** 签到会员在本人场次结束前 10 分钟，可忽略套餐日预约上限追加当日后续空位。 */
-    private boolean hasSameDayRolloverPrivilege(Long memberId, LocalDate reservationDate)
+    /** 签到会员从当前场次结束前 10 分钟起，可预约当日更晚的下一个空位时段。 */
+    private boolean hasSameDayRolloverPrivilege(Long memberId, LocalDate reservationDate, LocalTime targetStart)
     {
         if (!LocalDate.now().equals(reservationDate)) return false;
-        Integer count = jdbcTemplate.queryForObject(
-                "select count(1) from xy_reservation r join xy_reservation_slot s on s.slot_id=r.slot_id "
+        List<java.sql.Time> endTimes = jdbcTemplate.query(
+                "select s.end_time from xy_reservation r join xy_reservation_slot s on s.slot_id=r.slot_id "
                         + "where r.member_id=? and r.reservation_date=curdate() and r.status='CHECKED_IN' "
-                        + "and curtime()>=subtime(s.end_time,'00:10:00') and curtime()<s.end_time",
-                Integer.class, memberId);
-        return count != null && count > 0;
+                        + "order by s.end_time desc limit 1",
+                (rs, rowNum) -> rs.getTime(1), memberId);
+        if (endTimes.isEmpty()) return false;
+        LocalTime currentEnd = endTimes.get(0).toLocalTime();
+        return !LocalTime.now().isBefore(currentEnd.minusMinutes(10)) && !targetStart.isBefore(currentEnd);
     }
     public List<Map<String, Object>> memberReservations(Long memberId)
     {
