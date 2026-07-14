@@ -27,7 +27,10 @@ import com.ruoyi.common.exception.ServiceException;
 @SpringBootTest(
         classes = RuoYiApplication.class,
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
-        properties = "TOKEN_SECRET=integration-test-token-secret-at-least-32-bytes")
+        properties = {
+                "TOKEN_SECRET=integration-test-token-secret-at-least-32-bytes",
+                "xy.wechat-pay.demo-enabled=true"
+        })
 @EnabledIfEnvironmentVariable(named = "RUN_XY_INTEGRATION_TESTS", matches = "true")
 @Transactional
 class XyBusinessFlowIntegrationTest
@@ -36,6 +39,9 @@ class XyBusinessFlowIntegrationTest
 
     @Autowired
     private XyBusinessService service;
+
+    @Autowired
+    private XyWechatPayService payService;
 
     @Autowired
     private JdbcTemplate jdbc;
@@ -125,6 +131,15 @@ class XyBusinessFlowIntegrationTest
         String afterSaleNo = service.createAfterSale(memberId, String.valueOf(paidOrder.get("orderNo")), "商品问题", "集成测试售后");
         service.rejectAfterSale(afterSaleNo);
         assertEquals("REJECTED", jdbc.queryForObject("select status from xy_after_sale where after_sale_no=?", String.class, afterSaleNo));
+
+        Map<String, Object> refundedOrder = service.createOrder(memberId, orderInput);
+        service.createOrderPayment(memberId, String.valueOf(refundedOrder.get("orderNo")), payService);
+        String refundedAfterSaleNo = service.createAfterSale(memberId, String.valueOf(refundedOrder.get("orderNo")), "退款测试", "模拟支付退款");
+        service.approveAfterSale(refundedAfterSaleNo, payService);
+        assertEquals("APPROVED", jdbc.queryForObject("select status from xy_after_sale where after_sale_no=?", String.class, refundedAfterSaleNo));
+        assertEquals("REFUNDED", jdbc.queryForObject("select status from xy_order where order_id=?", String.class, refundedOrder.get("orderId")));
+        assertEquals("REFUNDED", jdbc.queryForObject("select status from xy_payment where business_type='ORDER' and business_id=?", String.class, refundedOrder.get("orderId")));
+        assertEquals(9, jdbc.queryForObject("select stock from xy_product where product_id=?", Integer.class, productId));
 
         Map<String, Object> previousCode = service.issueMemberVerifyCode(memberId);
         assertEquals(10, ((Number) previousCode.get("expiresIn")).intValue());

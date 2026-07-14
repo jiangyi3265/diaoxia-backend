@@ -235,7 +235,7 @@ public class XyBusinessService
 
     public List<Map<String, Object>> listMembershipPlans()
     {
-        return jdbcTemplate.queryForList("select plan_id as planId, plan_name as planName, amount, duration_days as durationDays, daily_reservation_limit as dailyReservationLimit from xy_membership_plan where status='0' order by sort_order, plan_id");
+        return jdbcTemplate.queryForList("select plan_id as planId, plan_name as planName, amount, duration_days as durationDays, daily_reservation_limit as dailyReservationLimit from xy_membership_plan where status='0' and duration_days=30 order by sort_order, plan_id limit 1");
     }
 
     public Map<String, Object> reservationAvailability(Long storeId, LocalDate reservationDate)
@@ -438,12 +438,12 @@ public class XyBusinessService
 
     public List<Map<String, Object>> memberOrders(Long memberId)
     {
-        return jdbcTemplate.queryForList("select o.order_id as orderId, o.order_no as orderNo, o.delivery_type as deliveryType, o.payable_amount as payableAmount, o.status, o.create_time as createTime, (select product_name from xy_order_item i where i.order_id=o.order_id order by item_id limit 1) as productName, (select cover_url from xy_order_item i where i.order_id=o.order_id order by item_id limit 1) as coverUrl, (select sum(quantity) from xy_order_item i where i.order_id=o.order_id) as quantity from xy_order o where o.member_id = ? order by o.create_time desc", memberId);
+        return jdbcTemplate.queryForList("select o.order_id as orderId, o.order_no as orderNo, o.delivery_type as deliveryType, o.payable_amount as payableAmount, o.status, o.create_time as createTime, (select product_name from xy_order_item i where i.order_id=o.order_id order by item_id limit 1) as productName, (select cover_url from xy_order_item i where i.order_id=o.order_id order by item_id limit 1) as coverUrl, (select sum(quantity) from xy_order_item i where i.order_id=o.order_id) as quantity, (select a.status from xy_after_sale a where a.order_id=o.order_id order by a.after_sale_id desc limit 1) as afterSaleStatus from xy_order o where o.member_id = ? order by o.create_time desc", memberId);
     }
 
     public Map<String, Object> orderDetail(Long memberId, String orderNo)
     {
-        List<Map<String, Object>> orders = jdbcTemplate.queryForList("select order_id as orderId, order_no as orderNo, delivery_type as deliveryType, total_amount as totalAmount, discount_amount as discountAmount, member_discount_rate as memberDiscountRate, freight_amount as freightAmount, payable_amount as payableAmount, paid_amount as paidAmount, status, receiver_snapshot as receiverSnapshot, create_time as createTime from xy_order where member_id = ? and order_no = ?", memberId, orderNo);
+        List<Map<String, Object>> orders = jdbcTemplate.queryForList("select o.order_id as orderId, o.order_no as orderNo, o.delivery_type as deliveryType, o.total_amount as totalAmount, o.discount_amount as discountAmount, o.member_discount_rate as memberDiscountRate, o.freight_amount as freightAmount, o.payable_amount as payableAmount, o.paid_amount as paidAmount, o.status, o.receiver_snapshot as receiverSnapshot, o.create_time as createTime, (select a.status from xy_after_sale a where a.order_id=o.order_id order by a.after_sale_id desc limit 1) as afterSaleStatus from xy_order o where o.member_id = ? and o.order_no = ?", memberId, orderNo);
         if (orders.isEmpty()) throw new ServiceException("订单不存在");
         Map<String, Object> order = orders.get(0);
         order.put("items", jdbcTemplate.queryForList("select product_id as productId, product_name as productName, cover_url as coverUrl, sale_price as salePrice, quantity, subtotal_amount as subtotalAmount from xy_order_item where order_id = ?", order.get("orderId")));
@@ -472,7 +472,7 @@ public class XyBusinessService
     }
 
     @Transactional
-    public Map<String,Object> createMembershipPayment(Long memberId, Long planId, XyWechatPayService payService){List<Map<String,Object>> plans=jdbcTemplate.queryForList("select plan_id,plan_name,amount from xy_membership_plan where plan_id=? and status='0'",planId);if(plans.isEmpty())throw new ServiceException("会员套餐不存在或已下架");Map<String,Object> plan=plans.get(0);String orderNo=nextNo("MO");jdbcTemplate.update("insert into xy_membership_order(order_no,member_id,plan_id,amount) values(?,?,?,?)",orderNo,memberId,planId,plan.get("amount"));Long id=jdbcTemplate.queryForObject("select last_insert_id()",Long.class);String paymentNo=nextNo("PY");jdbcTemplate.update("insert into xy_payment(payment_no,member_id,business_type,business_id,amount,channel) values(?,?,?,?,?,?)",paymentNo,memberId,"MEMBERSHIP",id,plan.get("amount"),payService.isDemoEnabled()?"DEMO":"WECHAT");int totalFen=new BigDecimal(plan.get("amount").toString()).movePointRight(2).intValueExact();if(payService.isDemoEnabled()){completeOrderPayment(paymentNo,"DEMO-"+nextNo("TX"),totalFen);Map<String,Object> result=new HashMap<>();result.put("demoPayment",true);result.put("paid",true);result.put("orderNo",orderNo);return result;}String openid=jdbcTemplate.queryForObject("select openid from xy_member where member_id=?",String.class,memberId);return payService.jsapi(paymentNo,openid,totalFen,"钓虾会员套餐");}
+    public Map<String,Object> createMembershipPayment(Long memberId, Long planId, XyWechatPayService payService){List<Map<String,Object>> plans=jdbcTemplate.queryForList("select plan_id,plan_name,amount from xy_membership_plan where plan_id=? and status='0' and duration_days=30",planId);if(plans.isEmpty())throw new ServiceException("包月会员方案不存在或已下架");Map<String,Object> plan=plans.get(0);String orderNo=nextNo("MO");jdbcTemplate.update("insert into xy_membership_order(order_no,member_id,plan_id,amount) values(?,?,?,?)",orderNo,memberId,planId,plan.get("amount"));Long id=jdbcTemplate.queryForObject("select last_insert_id()",Long.class);String paymentNo=nextNo("PY");jdbcTemplate.update("insert into xy_payment(payment_no,member_id,business_type,business_id,amount,channel) values(?,?,?,?,?,?)",paymentNo,memberId,"MEMBERSHIP",id,plan.get("amount"),payService.isDemoEnabled()?"DEMO":"WECHAT");int totalFen=new BigDecimal(plan.get("amount").toString()).movePointRight(2).intValueExact();if(payService.isDemoEnabled()){completeOrderPayment(paymentNo,"DEMO-"+nextNo("TX"),totalFen);Map<String,Object> result=new HashMap<>();result.put("demoPayment",true);result.put("paid",true);result.put("orderNo",orderNo);return result;}String openid=jdbcTemplate.queryForObject("select openid from xy_member where member_id=?",String.class,memberId);return payService.jsapi(paymentNo,openid,totalFen,"钓虾包月会员");}
 
     private void activateMembership(Long membershipOrderId,String paymentNo){Map<String,Object> order=jdbcTemplate.queryForMap("select o.member_id,o.plan_id,p.duration_days from xy_membership_order o join xy_membership_plan p on p.plan_id=o.plan_id where o.membership_order_id=?",membershipOrderId);Long memberId=((Number)order.get("member_id")).longValue(),planId=((Number)order.get("plan_id")).longValue();int days=((Number)order.get("duration_days")).intValue();java.sql.Date max=jdbcTemplate.queryForObject("select max(expire_date) from xy_membership_card where member_id=? and status='ACTIVE'",java.sql.Date.class,memberId);LocalDate start=max!=null&&!max.toLocalDate().isBefore(LocalDate.now())?max.toLocalDate().plusDays(1):LocalDate.now();jdbcTemplate.update("insert into xy_membership_card(member_id,plan_id,card_no,start_date,expire_date,source_payment_no) values(?,?,?,?,?,?)",memberId,planId,nextNo("MC"),start,start.plusDays(days-1),paymentNo);jdbcTemplate.update("update xy_membership_order set status='PAID',paid_time=now() where membership_order_id=?",membershipOrderId);}
 
@@ -621,8 +621,42 @@ public class XyBusinessService
     @Transactional public void shipOrder(String orderNo){int count=jdbcTemplate.update("update xy_order set status='SHIPPED',shipped_time=now() where order_no=? and status='PAID'",orderNo);if(count!=1)throw new ServiceException("当前订单不能发货");}
     public List<Map<String,Object>> adminAfterSales(){return jdbcTemplate.queryForList("select a.after_sale_no as afterSaleNo,a.reason,a.description_text as description,a.status,a.refund_no as refundNo,a.refund_id as refundId,a.create_time as createTime,o.order_no as orderNo,o.paid_amount as paidAmount,m.nickname,m.mobile from xy_after_sale a join xy_order o on o.order_id=a.order_id join xy_member m on m.member_id=a.member_id order by a.create_time desc");}
     public void rejectAfterSale(String afterSaleNo){int count=jdbcTemplate.update("update xy_after_sale set status='REJECTED' where after_sale_no=? and status='PENDING'",afterSaleNo);if(count!=1)throw new ServiceException("售后单当前不能拒绝");}
-    @Transactional public void approveAfterSale(String afterSaleNo,XyWechatPayService payService){List<Map<String,Object>> rows=jdbcTemplate.queryForList("select a.order_id,o.paid_amount,p.transaction_id from xy_after_sale a join xy_order o on o.order_id=a.order_id join xy_payment p on p.business_type='ORDER' and p.business_id=o.order_id and p.status='SUCCESS' where a.after_sale_no=? and a.status in ('PENDING','REFUND_FAILED') for update",afterSaleNo);if(rows.isEmpty())throw new ServiceException("售后单或成功支付记录不存在");Map<String,Object> row=rows.get(0);int fen=new BigDecimal(row.get("paid_amount").toString()).movePointRight(2).intValueExact();String refundNo=nextNo("RF");Map<String,Object> refund=payService.refund(String.valueOf(row.get("transaction_id")),refundNo,fen,fen);jdbcTemplate.update("update xy_after_sale set status='REFUNDING',refund_no=?,refund_id=? where after_sale_no=?",refundNo,refund.get("refund_id"),afterSaleNo);jdbcTemplate.update("update xy_payment set status='REFUNDING' where business_type='ORDER' and business_id=?",row.get("order_id"));jdbcTemplate.update("update xy_order set status='AFTER_SALE' where order_id=?",row.get("order_id"));}
-    @Transactional public void completeRefund(String refundNo,String refundId){List<Map<String,Object>> rows=jdbcTemplate.queryForList("select order_id from xy_after_sale where refund_no=? and status in('REFUNDING','APPROVED') for update",refundNo);if(rows.isEmpty())return;Long orderId=((Number)rows.get(0).get("order_id")).longValue();jdbcTemplate.update("update xy_after_sale set status='APPROVED',refund_id=? where refund_no=?",refundId,refundNo);jdbcTemplate.update("update xy_payment set status='REFUNDED' where business_type='ORDER' and business_id=?",orderId);jdbcTemplate.update("update xy_order set status='REFUNDED' where order_id=?",orderId);}
+    @Transactional
+    public void approveAfterSale(String afterSaleNo, XyWechatPayService payService)
+    {
+        List<Map<String,Object>> rows = jdbcTemplate.queryForList(
+                "select a.order_id,o.paid_amount,p.transaction_id,p.channel from xy_after_sale a join xy_order o on o.order_id=a.order_id join xy_payment p on p.business_type='ORDER' and p.business_id=o.order_id and p.status='SUCCESS' where a.after_sale_no=? and a.status in ('PENDING','REFUND_FAILED') for update",
+                afterSaleNo);
+        if (rows.isEmpty()) throw new ServiceException("退款申请或成功支付记录不存在");
+        Map<String,Object> row = rows.get(0);
+        int fen = new BigDecimal(row.get("paid_amount").toString()).movePointRight(2).intValueExact();
+        String refundNo = nextNo("RF");
+        String refundId;
+        if ("DEMO".equals(String.valueOf(row.get("channel"))))
+        {
+            refundId = "DEMO-" + nextNo("RID");
+        }
+        else
+        {
+            Map<String,Object> refund = payService.refund(String.valueOf(row.get("transaction_id")), refundNo, fen, fen);
+            refundId = String.valueOf(refund.get("refund_id"));
+        }
+        jdbcTemplate.update("update xy_after_sale set status='REFUNDING',refund_no=?,refund_id=? where after_sale_no=?", refundNo, refundId, afterSaleNo);
+        jdbcTemplate.update("update xy_payment set status='REFUNDING' where business_type='ORDER' and business_id=?", row.get("order_id"));
+        jdbcTemplate.update("update xy_order set status='AFTER_SALE' where order_id=?", row.get("order_id"));
+        if ("DEMO".equals(String.valueOf(row.get("channel")))) completeRefund(refundNo, refundId);
+    }
+    @Transactional
+    public void completeRefund(String refundNo, String refundId)
+    {
+        List<Map<String,Object>> rows = jdbcTemplate.queryForList("select order_id,status from xy_after_sale where refund_no=? and status in('REFUNDING','APPROVED') for update", refundNo);
+        if (rows.isEmpty() || "APPROVED".equals(rows.get(0).get("status"))) return;
+        Long orderId = ((Number) rows.get(0).get("order_id")).longValue();
+        jdbcTemplate.update("update xy_after_sale set status='APPROVED',refund_id=? where refund_no=?", refundId, refundNo);
+        jdbcTemplate.update("update xy_payment set status='REFUNDED' where business_type='ORDER' and business_id=?", orderId);
+        jdbcTemplate.update("update xy_order set status='REFUNDED' where order_id=?", orderId);
+        jdbcTemplate.update("update xy_product p join xy_order_item i on i.product_id=p.product_id set p.stock=p.stock+i.quantity where i.order_id=?", orderId);
+    }
     @Transactional public void failRefund(String refundNo,String refundId){List<Map<String,Object>> rows=jdbcTemplate.queryForList("select order_id,original_order_status from xy_after_sale where refund_no=? and status='REFUNDING' for update",refundNo);if(rows.isEmpty())return;Map<String,Object> row=rows.get(0);Long orderId=((Number)row.get("order_id")).longValue();String originalStatus=StringUtils.isEmpty((String)row.get("original_order_status"))?"COMPLETED":String.valueOf(row.get("original_order_status"));jdbcTemplate.update("update xy_after_sale set status='REFUND_FAILED',refund_id=? where refund_no=?",refundId,refundNo);jdbcTemplate.update("update xy_payment set status='SUCCESS' where business_type='ORDER' and business_id=?",orderId);jdbcTemplate.update("update xy_order set status=? where order_id=?",originalStatus,orderId);}
 
     public List<Map<String, Object>> staffMembers()
