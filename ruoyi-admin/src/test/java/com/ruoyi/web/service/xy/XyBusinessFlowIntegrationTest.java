@@ -124,8 +124,11 @@ class XyBusinessFlowIntegrationTest
         service.rejectAfterSale(afterSaleNo);
         assertEquals("REJECTED", jdbc.queryForObject("select status from xy_after_sale where after_sale_no=?", String.class, afterSaleNo));
 
+        Map<String, Object> previousCode = service.issueMemberVerifyCode(memberId);
+        assertEquals(10, ((Number) previousCode.get("expiresIn")).intValue());
         Map<String, Object> code = service.issueMemberVerifyCode(memberId);
         String verifyCode = String.valueOf(code.get("code"));
+        assertThrows(ServiceException.class, () -> service.verifyMemberCode(String.valueOf(previousCode.get("code")), "integration-test"));
         assertEquals(memberId, ((Number) service.verifyMemberCode(verifyCode, "integration-test").get("memberId")).longValue());
         assertThrows(ServiceException.class, () -> service.verifyMemberCode(verifyCode, "integration-test"));
     }

@@ -33,6 +33,8 @@ public class XyBusinessService
 {
     private static final String MEMBER_TOKEN_PREFIX = "xy:member:token:";
     private static final String MEMBER_VERIFY_PREFIX = "xy:member:verify:";
+    private static final String MEMBER_VERIFY_MEMBER_PREFIX = "xy:member:verify:member:";
+    private static final int MEMBER_VERIFY_EXPIRES_SECONDS = 10;
     private static final String MEMBER_PRODUCT_DISCOUNT_RATE_KEY = "member_product_discount_rate";
     private static final BigDecimal DEFAULT_MEMBER_PRODUCT_DISCOUNT_RATE = new BigDecimal("0.95");
     private static final DateTimeFormatter NO_TIME = DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS");
@@ -450,10 +452,40 @@ public class XyBusinessService
 
     public List<Map<String,Object>> memberBills(Long memberId){return jdbcTemplate.queryForList("select payment_no as paymentNo,business_type as businessType,amount,status,paid_time as paidTime,create_time as createTime from xy_payment where member_id=? order by create_time desc",memberId);}
 
-    public Map<String,Object> issueMemberVerifyCode(Long memberId){if(currentCard(memberId)==null)throw new ServiceException("没有有效会员卡");String code;do{code=randomDigits(8);}while(redisCache.getCacheObject(MEMBER_VERIFY_PREFIX+code)!=null);redisCache.setCacheObject(MEMBER_VERIFY_PREFIX+code,memberId,2,TimeUnit.MINUTES);Map<String,Object> result=new HashMap<>();result.put("code",code);result.put("expiresIn",120);return result;}
+    public synchronized Map<String,Object> issueMemberVerifyCode(Long memberId)
+    {
+        if (currentCard(memberId) == null) throw new ServiceException("没有有效会员卡");
+        String memberCodeKey = MEMBER_VERIFY_MEMBER_PREFIX + memberId;
+        String previousCode = redisCache.getCacheObject(memberCodeKey);
+        if (StringUtils.isNotEmpty(previousCode)) redisCache.deleteObject(MEMBER_VERIFY_PREFIX + previousCode);
+
+        String code;
+        do { code = randomDigits(8); } while (redisCache.getCacheObject(MEMBER_VERIFY_PREFIX + code) != null);
+        redisCache.setCacheObject(MEMBER_VERIFY_PREFIX + code, memberId, MEMBER_VERIFY_EXPIRES_SECONDS, TimeUnit.SECONDS);
+        redisCache.setCacheObject(memberCodeKey, code, MEMBER_VERIFY_EXPIRES_SECONDS, TimeUnit.SECONDS);
+
+        Map<String,Object> result = new HashMap<>();
+        result.put("code", code);
+        result.put("expiresIn", MEMBER_VERIFY_EXPIRES_SECONDS);
+        result.put("expiresAt", System.currentTimeMillis() + MEMBER_VERIFY_EXPIRES_SECONDS * 1000L);
+        return result;
+    }
 
     @Transactional
-    public Map<String,Object> verifyMemberCode(String code,String operator){Long memberId=redisCache.getCacheObject(MEMBER_VERIFY_PREFIX+code);if(memberId==null)throw new ServiceException("会员码无效或已过期");Map<String,Object> member=memberProfile(memberId);jdbcTemplate.update("insert into xy_member_visit(member_id,verify_code,verified_by) values(?,?,?)",memberId,code,operator);redisCache.deleteObject(MEMBER_VERIFY_PREFIX+code);return member;}
+    public Map<String,Object> verifyMemberCode(String code,String operator)
+    {
+        Long memberId = redisCache.getCacheObject(MEMBER_VERIFY_PREFIX + code);
+        if (memberId == null) throw new ServiceException("会员二维码无效或已过期");
+        String memberCodeKey = MEMBER_VERIFY_MEMBER_PREFIX + memberId;
+        String currentCode = redisCache.getCacheObject(memberCodeKey);
+        if (!code.equals(currentCode)) throw new ServiceException("会员二维码已更新，请扫描最新二维码");
+
+        Map<String,Object> member = memberProfile(memberId);
+        jdbcTemplate.update("insert into xy_member_visit(member_id,verify_code,verified_by) values(?,?,?)",memberId,code,operator);
+        redisCache.deleteObject(MEMBER_VERIFY_PREFIX + code);
+        redisCache.deleteObject(memberCodeKey);
+        return member;
+    }
 
     @Transactional
     public void confirmReceipt(Long memberId, String orderNo)
