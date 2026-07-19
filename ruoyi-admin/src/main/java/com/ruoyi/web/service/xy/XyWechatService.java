@@ -7,7 +7,11 @@ import java.time.format.DateTimeFormatter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 import com.ruoyi.common.exception.ServiceException;
@@ -25,7 +29,7 @@ public class XyWechatService
     private static final DateTimeFormatter REMINDER_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
     private final XyWechatProperties properties;
     private final ObjectMapper objectMapper;
-    private final RestTemplate restTemplate = new RestTemplate();
+    private final RestTemplate restTemplate;
     private volatile String accessToken;
     private volatile long accessTokenExpiresAt;
 
@@ -33,6 +37,10 @@ public class XyWechatService
     {
         this.properties = properties;
         this.objectMapper = objectMapper;
+        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+        requestFactory.setConnectTimeout(5000);
+        requestFactory.setReadTimeout(10000);
+        this.restTemplate = new RestTemplate(requestFactory);
     }
 
     public String[] exchangeCode(String code)
@@ -59,7 +67,8 @@ public class XyWechatService
         }
         catch (Exception ex)
         {
-            log.error("微信 code2session 调用失败", ex);
+            // RestTemplate 异常可能包含带 AppSecret 的完整请求地址，日志中不得输出异常明细。
+            log.warn("微信 code2session 调用失败，异常类型={}", ex.getClass().getSimpleName());
             throw new ServiceException("微信登录服务暂不可用，请稍后重试");
         }
     }
@@ -102,8 +111,11 @@ public class XyWechatService
             payload.put("lang", "zh_CN");
             payload.put("data", data);
 
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            HttpEntity<String> request = new HttpEntity<>(objectMapper.writeValueAsString(payload), headers);
             ResponseEntity<String> response = restTemplate.postForEntity(SUBSCRIBE_SEND_URL,
-                    objectMapper.writeValueAsString(payload), String.class, accessToken());
+                    request, String.class, accessToken());
             Map<String, Object> body = objectMapper.readValue(response.getBody(), Map.class);
             Number errorCode = body.get("errcode") instanceof Number ? (Number) body.get("errcode") : null;
             if (errorCode != null && errorCode.intValue() != 0)
@@ -116,8 +128,9 @@ public class XyWechatService
         }
         catch (Exception ex)
         {
-            log.error("微信预约订阅消息发送失败", ex);
-            return limit(ex.getClass().getSimpleName() + ": " + ex.getMessage(), 500);
+            // access_token 请求同样携带 AppSecret，避免把 URL/异常消息写入日志或业务表。
+            log.warn("微信预约订阅消息发送失败，异常类型={}", ex.getClass().getSimpleName());
+            return "微信订阅消息服务调用异常（" + ex.getClass().getSimpleName() + "）";
         }
     }
 

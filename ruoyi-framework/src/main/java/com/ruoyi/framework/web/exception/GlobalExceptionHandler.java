@@ -57,8 +57,17 @@ public class GlobalExceptionHandler
     @ExceptionHandler(ServiceException.class)
     public AjaxResult handleServiceException(ServiceException e, HttpServletRequest request)
     {
-        log.error(e.getMessage(), e);
         Integer code = e.getCode();
+        String requestURI = request.getRequestURI();
+        if (Integer.valueOf(HttpStatus.UNAUTHORIZED).equals(code))
+        {
+            log.debug("请求地址'{}',业务校验未通过：{}", requestURI, e.getMessage());
+        }
+        else
+        {
+            // ServiceException 表示可预期的业务拒绝，不打印堆栈；未知异常仍由下方处理器 ERROR 记录。
+            log.warn("请求地址'{}',业务校验未通过：{}", requestURI, e.getMessage());
+        }
         return StringUtils.isNotNull(code) ? AjaxResult.error(code, e.getMessage()) : AjaxResult.error(e.getMessage());
     }
 

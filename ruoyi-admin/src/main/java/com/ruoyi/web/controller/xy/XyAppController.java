@@ -43,8 +43,10 @@ public class XyAppController
     public AjaxResult createSession(@RequestBody Map<String, Object> body)
     {
         Object codeValue = body.get("code");
+        Object inviteCodeValue = body.get("inviteCode");
         String[] identity = wechatService.exchangeCode(codeValue == null ? null : String.valueOf(codeValue).trim());
-        return AjaxResult.success(service.loginByOpenId(identity[0], identity[1]));
+        return AjaxResult.success(service.loginByOpenId(identity[0], identity[1],
+                inviteCodeValue == null ? null : String.valueOf(inviteCodeValue).trim()));
     }
 
     @Anonymous
@@ -197,7 +199,7 @@ public class XyAppController
         Object reasonValue = body.get("reason");
         String reason = reasonValue == null ? null : String.valueOf(reasonValue).trim();
         if (StringUtils.isEmpty(reason)) throw new ServiceException("请选择售后原因");
-        return AjaxResult.success(service.createAfterSale(service.requireMember(token), orderNo, reason, body.get("description") == null ? null : String.valueOf(body.get("description")).trim()));
+        return AjaxResult.success((Object) service.createAfterSale(service.requireMember(token), orderNo, reason, body.get("description") == null ? null : String.valueOf(body.get("description")).trim()));
     }
 
     private LocalDate parseDate(String text)

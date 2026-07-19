@@ -35,6 +35,7 @@ public class XyBusinessService
     private static final String MEMBER_VERIFY_PREFIX = "xy:member:verify:";
     private static final String MEMBER_VERIFY_MEMBER_PREFIX = "xy:member:verify:member:";
     private static final int MEMBER_VERIFY_EXPIRES_SECONDS = 10;
+    private static final int RESERVATION_WINDOW_DAYS = 30;
     private static final String MEMBER_PRODUCT_DISCOUNT_RATE_KEY = "member_product_discount_rate";
     private static final BigDecimal DEFAULT_MEMBER_PRODUCT_DISCOUNT_RATE = new BigDecimal("0.95");
     private static final DateTimeFormatter NO_TIME = DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS");
@@ -110,26 +111,66 @@ public class XyBusinessService
     @Transactional
     public Map<String, Object> loginByOpenId(String openid, String unionid)
     {
+        return loginByOpenId(openid, unionid, null);
+    }
+
+    /** 首次登录或尚未归属邀请人时，可用有效邀请码绑定一次，后续登录不能改绑。 */
+    @Transactional
+    public Map<String, Object> loginByOpenId(String openid, String unionid, String inviteCode)
+    {
+        String normalizedInviteCode = StringUtils.isEmpty(inviteCode) ? null : inviteCode.trim();
         List<Map<String, Object>> existing = jdbcTemplate.queryForList(
-                "select member_id, nickname, avatar_url from xy_member where openid = ?", openid);
+                "select member_id,nickname,avatar_url,status,inviter_member_id from xy_member where openid=? for update", openid);
         Long memberId;
         if (existing.isEmpty())
         {
-            String inviteCode = generateInviteCode();
-            jdbcTemplate.update("insert into xy_member(openid, unionid, invite_code) values (?, ?, ?)", openid, unionid, inviteCode);
+            Long inviterMemberId = resolveInviterMemberId(normalizedInviteCode);
+            String generatedInviteCode = generateInviteCode();
+            jdbcTemplate.update("insert into xy_member(openid,unionid,invite_code,inviter_member_id) values(?,?,?,?)",
+                    openid, unionid, generatedInviteCode, inviterMemberId);
             memberId = jdbcTemplate.queryForObject("select last_insert_id()", Long.class);
         }
         else
         {
             memberId = ((Number) existing.get(0).get("member_id")).longValue();
-            jdbcTemplate.update("update xy_member set unionid = coalesce(?, unionid) where member_id = ?", unionid, memberId);
+            if (!"0".equals(String.valueOf(existing.get(0).get("status"))))
+                throw new ServiceException("会员账号不可用", 403);
+            // 已经成功绑定过邀请人的会员只更新微信身份，不再解析后来携带的分享参数，
+            // 防止失效/伪造的邀请码反过来阻断正常登录，同时保持邀请关系不可改绑。
+            if (existing.get(0).get("inviter_member_id") == null)
+            {
+                Long inviterMemberId = resolveInviterMemberId(normalizedInviteCode);
+                if (inviterMemberId != null && inviterMemberId.equals(memberId))
+                    throw new ServiceException("不能绑定自己的邀请码");
+                jdbcTemplate.update(
+                        "update xy_member set unionid=coalesce(?,unionid),inviter_member_id=? where member_id=? and inviter_member_id is null",
+                        unionid, inviterMemberId, memberId);
+            }
+            else
+            {
+                jdbcTemplate.update("update xy_member set unionid=coalesce(?,unionid) where member_id=?", unionid, memberId);
+            }
         }
         String token = UUID.randomUUID().toString().replace("-", "") + UUID.randomUUID().toString().replace("-", "");
         redisCache.setCacheObject(MEMBER_TOKEN_PREFIX + token, memberId, 30, TimeUnit.DAYS);
         Map<String, Object> result = new HashMap<>();
         result.put("memberToken", token);
         result.put("member", memberProfile(memberId));
+        Long boundInviter = jdbcTemplate.queryForObject(
+                "select inviter_member_id from xy_member where member_id=?", Long.class, memberId);
+        result.put("invitationBound", boundInviter != null);
         return result;
+    }
+
+    private Long resolveInviterMemberId(String inviteCode)
+    {
+        if (inviteCode == null) return null;
+        if (!inviteCode.matches("^\\d{6}$")) throw new ServiceException("邀请码格式不正确");
+        List<Long> inviters = jdbcTemplate.query(
+                "select member_id from xy_member where invite_code=? and status='0'",
+                (rs, rowNum) -> rs.getLong(1), inviteCode);
+        if (inviters.isEmpty()) throw new ServiceException("邀请码无效");
+        return inviters.get(0);
     }
 
     public Map<String, Object> memberProfile(Long memberId)
@@ -156,7 +197,7 @@ public class XyBusinessService
 
     public Map<String, Object> currentCard(Long memberId)
     {
-        List<Map<String, Object>> cards = jdbcTemplate.queryForList("select c.card_id as cardId, c.card_no as cardNo, c.start_date as startDate, c.expire_date as expireDate, c.status, c.usage_count as usageCount, p.plan_name as planName, p.daily_reservation_limit as dailyReservationLimit from xy_membership_card c join xy_membership_plan p on p.plan_id = c.plan_id where c.member_id = ? and c.status = 'ACTIVE' and c.expire_date >= curdate() order by c.expire_date desc limit 1", memberId);
+        List<Map<String, Object>> cards = jdbcTemplate.queryForList("select c.card_id as cardId, c.card_no as cardNo, c.start_date as startDate, c.expire_date as expireDate, c.status, c.usage_count as usageCount, p.plan_name as planName, p.daily_reservation_limit as dailyReservationLimit from xy_membership_card c join xy_membership_plan p on p.plan_id = c.plan_id where c.member_id = ? and c.status = 'ACTIVE' and c.start_date <= curdate() and c.expire_date >= curdate() order by c.expire_date desc limit 1", memberId);
         return cards.isEmpty() ? null : cards.get(0);
     }
 
@@ -240,6 +281,10 @@ public class XyBusinessService
 
     public Map<String, Object> reservationAvailability(Long storeId, LocalDate reservationDate)
     {
+        validateReservationDate(reservationDate);
+        Integer activeStore = jdbcTemplate.queryForObject(
+                "select count(1) from xy_store where store_id=? and status='0'", Integer.class, storeId);
+        if (activeStore == null || activeStore == 0) throw new ServiceException("门店不存在或暂未营业");
         Map<String, Object> result = new HashMap<>();
         result.put("date", reservationDate.toString());
         List<Map<String, Object>> slots = jdbcTemplate.queryForList("select s.slot_id as slotId, date_format(s.start_time, '%H:%i') as startTime, date_format(s.end_time, '%H:%i') as endTime, (select count(1) from xy_reservation r where r.slot_id = s.slot_id and r.reservation_date = ? and r.seat_lock = 1) as bookedCount, (select count(1) from xy_seat se where se.store_id = s.store_id and se.status = '0') as totalCount from xy_reservation_slot s where s.store_id = ? and s.status = '0' order by s.sort_order, s.start_time", reservationDate, storeId);
@@ -257,10 +302,7 @@ public class XyBusinessService
     @Transactional
     public Map<String, Object> createReservation(Long memberId, Long storeId, Long slotId, Long seatId, LocalDate reservationDate)
     {
-        if (reservationDate.isBefore(LocalDate.now()))
-        {
-            throw new ServiceException("不能预约过去的日期");
-        }
+        validateReservationDate(reservationDate);
         Map<String, Object> card = currentCard(memberId);
         if (card == null)
         {
@@ -268,7 +310,9 @@ public class XyBusinessService
         }
         // 串行化同一会员的预约请求，防止连续点击或并发请求绕过单预约限制。
         jdbcTemplate.queryForObject("select member_id from xy_member where member_id=? for update", Long.class, memberId);
-        List<Map<String, Object>> slotRows = jdbcTemplate.queryForList("select start_time,end_time from xy_reservation_slot where slot_id=? and store_id=? and status='0'", slotId, storeId);
+        List<Map<String, Object>> slotRows = jdbcTemplate.queryForList(
+                "select s.start_time,s.end_time from xy_reservation_slot s join xy_store st on st.store_id=s.store_id and st.status='0' where s.slot_id=? and s.store_id=? and s.status='0'",
+                slotId, storeId);
         if (slotRows.isEmpty()) throw new ServiceException("选择的时段不可用");
         LocalTime targetStart = ((java.sql.Time) slotRows.get(0).get("start_time")).toLocalTime();
         if (reservationDate.equals(LocalDate.now()) && !LocalTime.now().isBefore(targetStart))
@@ -351,7 +395,12 @@ public class XyBusinessService
     @Transactional
     public void cancelReservation(Long memberId, String reservationNo)
     {
-        int affected = jdbcTemplate.update("update xy_reservation set status = 'CANCELED', seat_lock = null, cancel_time = now() where member_id = ? and reservation_no = ? and status = 'BOOKED' and reservation_date >= curdate()", memberId, reservationNo);
+        int affected = jdbcTemplate.update(
+                "update xy_reservation r join xy_reservation_slot s on s.slot_id=r.slot_id "
+                        + "set r.status='CANCELED',r.seat_lock=null,r.cancel_time=now() "
+                        + "where r.member_id=? and r.reservation_no=? and r.status='BOOKED' "
+                        + "and (r.reservation_date>curdate() or (r.reservation_date=curdate() and s.start_time>curtime()))",
+                memberId, reservationNo);
         if (affected != 1) throw new ServiceException("该预约当前不能取消");
     }
 
@@ -453,7 +502,7 @@ public class XyBusinessService
     @Transactional
     public Map<String,Object> createOrderPayment(Long memberId, String orderNo, XyWechatPayService payService)
     {
-        List<Map<String,Object>> list=jdbcTemplate.queryForList("select o.order_id,o.payable_amount,m.openid from xy_order o join xy_member m on m.member_id=o.member_id where o.member_id=? and o.order_no=? and o.status='PENDING_PAYMENT'",memberId,orderNo);
+        List<Map<String,Object>> list=jdbcTemplate.queryForList("select o.order_id,o.payable_amount,m.openid from xy_order o join xy_member m on m.member_id=o.member_id where o.member_id=? and o.order_no=? and o.status='PENDING_PAYMENT' for update",memberId,orderNo);
         if(list.isEmpty())throw new ServiceException("当前订单不能支付"); Map<String,Object> row=list.get(0); Long orderId=((Number)row.get("order_id")).longValue(); String paymentNo=nextNo("PY");
         List<Map<String,Object>> existing=jdbcTemplate.queryForList("select payment_no from xy_payment where business_type='ORDER' and business_id=? and status='PENDING'",orderId); if(!existing.isEmpty())paymentNo=String.valueOf(existing.get(0).get("payment_no")); else jdbcTemplate.update("insert into xy_payment(payment_no,member_id,business_type,business_id,amount,channel) values(?,?,?,?,?,?)",paymentNo,memberId,"ORDER",orderId,row.get("payable_amount"),payService.isDemoEnabled()?"DEMO":"WECHAT");
         int totalFen=new BigDecimal(row.get("payable_amount").toString()).movePointRight(2).intValueExact();
@@ -468,13 +517,57 @@ public class XyBusinessService
     @Transactional
     public void completeOrderPayment(String paymentNo, String transactionId, Integer totalFen)
     {
-        List<Map<String,Object>> rows=jdbcTemplate.queryForList("select payment_id,business_type,business_id,member_id,amount,status from xy_payment where payment_no=? for update",paymentNo);if(rows.isEmpty())throw new ServiceException("支付单不存在");Map<String,Object> payment=rows.get(0);if("SUCCESS".equals(payment.get("status")))return;if(!"PENDING".equals(payment.get("status")))throw new ServiceException("支付单状态异常");if(new BigDecimal(payment.get("amount").toString()).movePointRight(2).intValueExact()!=totalFen)throw new ServiceException("支付金额校验失败");Long businessId=((Number)payment.get("business_id")).longValue();jdbcTemplate.update("update xy_payment set status='SUCCESS',transaction_id=?,paid_time=now() where payment_no=?",transactionId,paymentNo);if("ORDER".equals(payment.get("business_type"))){jdbcTemplate.update("update xy_order set status='PAID',paid_amount=payable_amount,paid_time=now() where order_id=? and status='PENDING_PAYMENT'",businessId);}else if("MEMBERSHIP".equals(payment.get("business_type"))){activateMembership(businessId,paymentNo);}
+        List<Map<String,Object>> rows = jdbcTemplate.queryForList(
+                "select payment_id,business_type,business_id,member_id,amount,status from xy_payment where payment_no=? for update",
+                paymentNo);
+        if (rows.isEmpty()) throw new ServiceException("支付单不存在");
+        Map<String,Object> payment = rows.get(0);
+        if ("SUCCESS".equals(payment.get("status"))) return;
+        if (!"PENDING".equals(payment.get("status"))) throw new ServiceException("支付单状态异常");
+        if (totalFen == null || new BigDecimal(payment.get("amount").toString()).movePointRight(2).intValueExact() != totalFen)
+            throw new ServiceException("支付金额校验失败");
+        if (StringUtils.isEmpty(transactionId)) throw new ServiceException("支付交易号不能为空");
+
+        Long businessId = ((Number) payment.get("business_id")).longValue();
+        String businessType = String.valueOf(payment.get("business_type"));
+        if ("ORDER".equals(businessType))
+        {
+            int updated = jdbcTemplate.update("update xy_order set status='PAID',paid_amount=payable_amount,paid_time=now() where order_id=? and status='PENDING_PAYMENT'", businessId);
+            if (updated != 1) throw new ServiceException("订单状态异常，无法完成支付");
+        }
+        else if ("MEMBERSHIP".equals(businessType))
+        {
+            activateMembership(businessId, paymentNo);
+        }
+        else
+        {
+            throw new ServiceException("支付业务类型不合法");
+        }
+        jdbcTemplate.update("update xy_payment set status='SUCCESS',transaction_id=?,paid_time=now() where payment_no=?", transactionId, paymentNo);
     }
 
     @Transactional
     public Map<String,Object> createMembershipPayment(Long memberId, Long planId, XyWechatPayService payService){List<Map<String,Object>> plans=jdbcTemplate.queryForList("select plan_id,plan_name,amount from xy_membership_plan where plan_id=? and status='0' and duration_days=30",planId);if(plans.isEmpty())throw new ServiceException("包月会员方案不存在或已下架");Map<String,Object> plan=plans.get(0);String orderNo=nextNo("MO");jdbcTemplate.update("insert into xy_membership_order(order_no,member_id,plan_id,amount) values(?,?,?,?)",orderNo,memberId,planId,plan.get("amount"));Long id=jdbcTemplate.queryForObject("select last_insert_id()",Long.class);String paymentNo=nextNo("PY");jdbcTemplate.update("insert into xy_payment(payment_no,member_id,business_type,business_id,amount,channel) values(?,?,?,?,?,?)",paymentNo,memberId,"MEMBERSHIP",id,plan.get("amount"),payService.isDemoEnabled()?"DEMO":"WECHAT");int totalFen=new BigDecimal(plan.get("amount").toString()).movePointRight(2).intValueExact();if(payService.isDemoEnabled()){completeOrderPayment(paymentNo,"DEMO-"+nextNo("TX"),totalFen);Map<String,Object> result=new HashMap<>();result.put("demoPayment",true);result.put("paid",true);result.put("orderNo",orderNo);return result;}String openid=jdbcTemplate.queryForObject("select openid from xy_member where member_id=?",String.class,memberId);return payService.jsapi(paymentNo,openid,totalFen,"钓虾包月会员");}
 
-    private void activateMembership(Long membershipOrderId,String paymentNo){Map<String,Object> order=jdbcTemplate.queryForMap("select o.member_id,o.plan_id,p.duration_days from xy_membership_order o join xy_membership_plan p on p.plan_id=o.plan_id where o.membership_order_id=?",membershipOrderId);Long memberId=((Number)order.get("member_id")).longValue(),planId=((Number)order.get("plan_id")).longValue();int days=((Number)order.get("duration_days")).intValue();java.sql.Date max=jdbcTemplate.queryForObject("select max(expire_date) from xy_membership_card where member_id=? and status='ACTIVE'",java.sql.Date.class,memberId);LocalDate start=max!=null&&!max.toLocalDate().isBefore(LocalDate.now())?max.toLocalDate().plusDays(1):LocalDate.now();jdbcTemplate.update("insert into xy_membership_card(member_id,plan_id,card_no,start_date,expire_date,source_payment_no) values(?,?,?,?,?,?)",memberId,planId,nextNo("MC"),start,start.plusDays(days-1),paymentNo);jdbcTemplate.update("update xy_membership_order set status='PAID',paid_time=now() where membership_order_id=?",membershipOrderId);}
+    private void activateMembership(Long membershipOrderId, String paymentNo)
+    {
+        List<Map<String,Object>> rows = jdbcTemplate.queryForList(
+                "select o.member_id,o.plan_id,p.duration_days from xy_membership_order o join xy_membership_plan p on p.plan_id=o.plan_id where o.membership_order_id=? and o.status='PENDING_PAYMENT' for update",
+                membershipOrderId);
+        if (rows.isEmpty()) throw new ServiceException("会员订单状态异常，无法完成支付");
+        Map<String,Object> order = rows.get(0);
+        Long memberId = ((Number) order.get("member_id")).longValue();
+        Long planId = ((Number) order.get("plan_id")).longValue();
+        int days = ((Number) order.get("duration_days")).intValue();
+        java.sql.Date max = jdbcTemplate.queryForObject(
+                "select max(expire_date) from xy_membership_card where member_id=? and status='ACTIVE'", java.sql.Date.class, memberId);
+        LocalDate start = max != null && !max.toLocalDate().isBefore(LocalDate.now())
+                ? max.toLocalDate().plusDays(1) : LocalDate.now();
+        jdbcTemplate.update("insert into xy_membership_card(member_id,plan_id,card_no,start_date,expire_date,source_payment_no) values(?,?,?,?,?,?)",
+                memberId, planId, nextNo("MC"), start, start.plusDays(days - 1), paymentNo);
+        jdbcTemplate.update("update xy_membership_order set status='PAID',paid_time=now() where membership_order_id=? and status='PENDING_PAYMENT'",
+                membershipOrderId);
+    }
 
     public List<Map<String,Object>> memberBills(Long memberId){return jdbcTemplate.queryForList("select payment_no as paymentNo,business_type as businessType,amount,status,paid_time as paidTime,create_time as createTime from xy_payment where member_id=? order by create_time desc",memberId);}
 
@@ -534,9 +627,10 @@ public class XyBusinessService
     @Transactional
     public String createAfterSale(Long memberId, String orderNo, String reason, String description)
     {
+        if (StringUtils.isEmpty(reason)) throw new ServiceException("请选择售后原因");
         checkLength(reason, 255, "售后原因不能超过255个字符");
         checkLength(description, 1000, "售后说明不能超过1000个字符");
-        List<Map<String, Object>> orders = jdbcTemplate.queryForList("select order_id,status from xy_order where member_id = ? and order_no = ? and status in ('PAID','SHIPPED','COMPLETED')", memberId, orderNo);
+        List<Map<String, Object>> orders = jdbcTemplate.queryForList("select order_id,status from xy_order where member_id = ? and order_no = ? and status in ('PAID','SHIPPED','COMPLETED') for update", memberId, orderNo);
         if (orders.isEmpty()) throw new ServiceException("当前订单不能申请售后");
         Long orderId = ((Number) orders.get(0).get("order_id")).longValue();
         Integer pending = jdbcTemplate.queryForObject("select count(1) from xy_after_sale where order_id=? and status in ('PENDING','REFUNDING','REFUND_FAILED')", Integer.class, orderId);
@@ -548,7 +642,7 @@ public class XyBusinessService
 
     public List<Map<String, Object>> adminMembers(String keyword)
     {
-        String sql = "select m.member_id as memberId, m.nickname, m.mobile, m.invite_code as inviteCode, m.status, m.create_time as createTime, c.card_no as cardNo, c.expire_date as expireDate, c.status as cardStatus from xy_member m left join xy_membership_card c on c.card_id=(select c2.card_id from xy_membership_card c2 where c2.member_id=m.member_id order by c2.expire_date desc limit 1) where 1=1";
+        String sql = "select m.member_id as memberId, m.nickname, m.mobile, m.invite_code as inviteCode, m.status, m.create_time as createTime, c.card_no as cardNo, c.expire_date as expireDate, c.status as cardStatus, inviter.nickname as inviterNickname, inviter.invite_code as inviterInviteCode from xy_member m left join xy_member inviter on inviter.member_id=m.inviter_member_id left join xy_membership_card c on c.card_id=(select c2.card_id from xy_membership_card c2 where c2.member_id=m.member_id order by c2.expire_date desc limit 1) where 1=1";
         List<Object> args = new ArrayList<>();
         if (StringUtils.isNotEmpty(keyword)) { sql += " and (m.nickname like ? or m.mobile like ? or m.invite_code like ?)"; args.add("%" + keyword + "%"); args.add("%" + keyword + "%"); args.add("%" + keyword + "%"); }
         sql += " order by m.create_time desc";
@@ -606,7 +700,7 @@ public class XyBusinessService
     {
         Map<String, Object> result = new HashMap<>();
         result.put("todayReservations", jdbcTemplate.queryForObject("select count(1) from xy_reservation where reservation_date=curdate() and seat_lock=1", Integer.class));
-        result.put("activeMembers", jdbcTemplate.queryForObject("select count(distinct member_id) from xy_membership_card where status='ACTIVE' and expire_date>=curdate()", Integer.class));
+        result.put("activeMembers", jdbcTemplate.queryForObject("select count(distinct member_id) from xy_membership_card where status='ACTIVE' and start_date<=curdate() and expire_date>=curdate()", Integer.class));
         result.put("pendingOrders", jdbcTemplate.queryForObject("select count(1) from xy_order where status='PENDING_PAYMENT'", Integer.class));
         result.put("todayPaidAmount", jdbcTemplate.queryForObject("select coalesce(sum(paid_amount),0) from xy_order where date(paid_time)=curdate() and status in ('PAID','SHIPPED','COMPLETED')", BigDecimal.class));
         return result;
@@ -617,7 +711,44 @@ public class XyBusinessService
         return jdbcTemplate.queryForList("select p.payment_no as paymentNo, p.business_type as businessType, p.amount, p.channel, p.status, p.transaction_id as transactionId, p.paid_time as paidTime, p.create_time as createTime, m.nickname, m.mobile from xy_payment p join xy_member m on m.member_id=p.member_id order by p.create_time desc");
     }
 
-    public List<Map<String,Object>> adminOrders(){return jdbcTemplate.queryForList("select o.order_id as orderId,o.order_no as orderNo,o.delivery_type as deliveryType,o.total_amount as totalAmount,o.discount_amount as discountAmount,o.member_discount_rate as memberDiscountRate,o.payable_amount as payableAmount,o.paid_amount as paidAmount,o.status,o.create_time as createTime,m.nickname,m.mobile from xy_order o join xy_member m on m.member_id=o.member_id order by o.create_time desc");}
+    public List<Map<String,Object>> adminOrders()
+    {
+        List<Map<String,Object>> orders = jdbcTemplate.queryForList(
+                "select o.order_id as orderId,o.order_no as orderNo,o.delivery_type as deliveryType,"
+                        + "o.total_amount as totalAmount,o.discount_amount as discountAmount,"
+                        + "o.member_discount_rate as memberDiscountRate,o.payable_amount as payableAmount,"
+                        + "o.paid_amount as paidAmount,o.receiver_snapshot as receiverSnapshot,o.status,"
+                        + "o.create_time as createTime,m.nickname,m.mobile "
+                        + "from xy_order o join xy_member m on m.member_id=o.member_id order by o.create_time desc");
+        if (orders.isEmpty()) return orders;
+
+        Map<Long, List<Map<String,Object>>> itemsByOrder = new HashMap<>();
+        List<Object> orderIds = new ArrayList<>();
+        for (Map<String,Object> order : orders)
+        {
+            Long orderId = ((Number) order.get("orderId")).longValue();
+            orderIds.add(orderId);
+            itemsByOrder.put(orderId, new ArrayList<>());
+        }
+        String placeholders = String.join(",", java.util.Collections.nCopies(orderIds.size(), "?"));
+        List<Map<String,Object>> items = jdbcTemplate.queryForList(
+                "select order_id as orderId,product_id as productId,product_name as productName,"
+                        + "cover_url as coverUrl,sale_price as salePrice,quantity,subtotal_amount as subtotalAmount "
+                        + "from xy_order_item where order_id in (" + placeholders + ") order by order_id,item_id",
+                orderIds.toArray());
+        for (Map<String,Object> item : items)
+        {
+            Long orderId = ((Number) item.get("orderId")).longValue();
+            List<Map<String,Object>> orderItems = itemsByOrder.get(orderId);
+            if (orderItems != null) orderItems.add(item);
+        }
+        for (Map<String,Object> order : orders)
+        {
+            Long orderId = ((Number) order.get("orderId")).longValue();
+            order.put("items", itemsByOrder.get(orderId));
+        }
+        return orders;
+    }
     @Transactional public void shipOrder(String orderNo){int count=jdbcTemplate.update("update xy_order set status='SHIPPED',shipped_time=now() where order_no=? and status='PAID'",orderNo);if(count!=1)throw new ServiceException("当前订单不能发货");}
     public List<Map<String,Object>> adminAfterSales(){return jdbcTemplate.queryForList("select a.after_sale_no as afterSaleNo,a.reason,a.description_text as description,a.status,a.refund_no as refundNo,a.refund_id as refundId,a.create_time as createTime,o.order_no as orderNo,o.paid_amount as paidAmount,m.nickname,m.mobile from xy_after_sale a join xy_order o on o.order_id=a.order_id join xy_member m on m.member_id=a.member_id order by a.create_time desc");}
     public void rejectAfterSale(String afterSaleNo){int count=jdbcTemplate.update("update xy_after_sale set status='REJECTED' where after_sale_no=? and status='PENDING'",afterSaleNo);if(count!=1)throw new ServiceException("售后单当前不能拒绝");}
@@ -630,7 +761,9 @@ public class XyBusinessService
         if (rows.isEmpty()) throw new ServiceException("退款申请或成功支付记录不存在");
         Map<String,Object> row = rows.get(0);
         int fen = new BigDecimal(row.get("paid_amount").toString()).movePointRight(2).intValueExact();
-        String refundNo = nextNo("RF");
+        // 商户退款单号必须在重试间保持不变：若微信已受理而本地事务提交失败，
+        // 再次审批会以同一 out_refund_no 查询/续办，避免生成第二笔真实退款。
+        String refundNo = "RF" + afterSaleNo;
         String refundId;
         if ("DEMO".equals(String.valueOf(row.get("channel"))))
         {
@@ -712,6 +845,15 @@ public class XyBusinessService
         if (storeId == null || !startTime.matches("^([01]\\d|2[0-3]):[0-5]\\d$") || !endTime.matches("^([01]\\d|2[0-3]):[0-5]\\d$") || startTime.compareTo(endTime) >= 0) throw new ServiceException("时段参数不合法");
         String status = "1".equals(String.valueOf(input.get("status"))) ? "1" : "0";
         int sortOrder = number(input.get("sortOrder")) == null ? 0 : number(input.get("sortOrder")).intValue();
+        List<Long> lockedStores = jdbcTemplate.queryForList("select store_id from xy_store where store_id=? for update", Long.class, storeId);
+        if (lockedStores.isEmpty()) throw new ServiceException("门店不存在");
+        if ("0".equals(status))
+        {
+            Integer overlaps = slotId == null
+                    ? jdbcTemplate.queryForObject("select count(1) from xy_reservation_slot where store_id=? and status='0' and start_time < ? and end_time > ?", Integer.class, storeId, endTime, startTime)
+                    : jdbcTemplate.queryForObject("select count(1) from xy_reservation_slot where store_id=? and status='0' and slot_id<>? and start_time < ? and end_time > ?", Integer.class, storeId, slotId, endTime, startTime);
+            if (overlaps != null && overlaps > 0) throw new ServiceException("该时段与现有可用预约时段重叠");
+        }
         try
         {
             if (slotId == null)
@@ -760,9 +902,17 @@ public class XyBusinessService
         BigDecimal amount = decimal(input.get("amount"), "套餐金额不合法");
         Integer durationDays = number(input.get("durationDays")) == null ? null : number(input.get("durationDays")).intValue();
         Integer dailyLimit = number(input.get("dailyReservationLimit")) == null ? 1 : number(input.get("dailyReservationLimit")).intValue();
-        if (amount.signum() <= 0 || durationDays == null || durationDays < 1 || dailyLimit < 1) throw new ServiceException("套餐参数不合法");
+        if (amount.signum() <= 0) throw new ServiceException("套餐金额不合法");
+        if (durationDays == null || durationDays != 30 || dailyLimit != 1)
+            throw new ServiceException("目前仅支持30天包月会员，基础预约上限必须为1次");
         String status = "1".equals(String.valueOf(input.get("status"))) ? "1" : "0";
         int sortOrder = number(input.get("sortOrder")) == null ? 0 : number(input.get("sortOrder")).intValue();
+        jdbcTemplate.queryForList("select plan_id from xy_membership_plan where duration_days=30 for update", Long.class);
+        if ("0".equals(status))
+        {
+            if (planId == null) jdbcTemplate.update("update xy_membership_plan set status='1' where duration_days=30 and status='0'");
+            else jdbcTemplate.update("update xy_membership_plan set status='1' where duration_days=30 and status='0' and plan_id<>?", planId);
+        }
         if (planId == null)
         {
             jdbcTemplate.update("insert into xy_membership_plan(plan_name,amount,duration_days,daily_reservation_limit,status,sort_order) values(?,?,?,?,?,?)", planName, amount, durationDays, dailyLimit, status, sortOrder);
@@ -782,6 +932,15 @@ public class XyBusinessService
             if (count == null || count == 0) return code;
         }
         throw new ServiceException("邀请码生成失败，请重试");
+    }
+
+    private void validateReservationDate(LocalDate reservationDate)
+    {
+        LocalDate today = LocalDate.now();
+        if (reservationDate == null || reservationDate.isBefore(today))
+            throw new ServiceException("不能预约过去的日期");
+        if (reservationDate.isAfter(today.plusDays(RESERVATION_WINDOW_DAYS - 1L)))
+            throw new ServiceException("仅可预约未来30天内的场次");
     }
 
     private String nextNo(String prefix)

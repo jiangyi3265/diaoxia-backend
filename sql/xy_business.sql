@@ -23,13 +23,38 @@ CREATE TABLE IF NOT EXISTS xy_member (
   avatar_url VARCHAR(500) DEFAULT NULL COMMENT '头像地址',
   mobile VARCHAR(32) DEFAULT NULL COMMENT '手机号',
   invite_code VARCHAR(12) NOT NULL COMMENT '邀请码',
+  inviter_member_id BIGINT DEFAULT NULL COMMENT '邀请人会员ID（首次绑定后不可改）',
   status CHAR(1) NOT NULL DEFAULT '0' COMMENT '状态：0正常，1停用',
   create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (member_id),
   UNIQUE KEY uk_xy_member_openid (openid),
-  UNIQUE KEY uk_xy_member_invite_code (invite_code)
+  UNIQUE KEY uk_xy_member_invite_code (invite_code),
+  KEY idx_xy_member_inviter (inviter_member_id),
+  CONSTRAINT fk_xy_member_inviter FOREIGN KEY (inviter_member_id) REFERENCES xy_member(member_id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='钓虾会员';
+
+-- 兼容已建库：补充邀请归属字段、索引和自关联外键。
+SET @xy_inviter_column = (SELECT IF(COUNT(*)=0,
+  'ALTER TABLE xy_member ADD COLUMN inviter_member_id BIGINT DEFAULT NULL COMMENT ''邀请人会员ID（首次绑定后不可改）'' AFTER invite_code',
+  'SELECT 1') FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='xy_member' AND column_name='inviter_member_id');
+PREPARE xy_inviter_column_stmt FROM @xy_inviter_column;
+EXECUTE xy_inviter_column_stmt;
+DEALLOCATE PREPARE xy_inviter_column_stmt;
+
+SET @xy_inviter_index = (SELECT IF(COUNT(*)=0,
+  'ALTER TABLE xy_member ADD KEY idx_xy_member_inviter (inviter_member_id)',
+  'SELECT 1') FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='xy_member' AND index_name='idx_xy_member_inviter');
+PREPARE xy_inviter_index_stmt FROM @xy_inviter_index;
+EXECUTE xy_inviter_index_stmt;
+DEALLOCATE PREPARE xy_inviter_index_stmt;
+
+SET @xy_inviter_fk = (SELECT IF(COUNT(*)=0,
+  'ALTER TABLE xy_member ADD CONSTRAINT fk_xy_member_inviter FOREIGN KEY (inviter_member_id) REFERENCES xy_member(member_id) ON DELETE SET NULL',
+  'SELECT 1') FROM information_schema.table_constraints WHERE constraint_schema=DATABASE() AND table_name='xy_member' AND constraint_name='fk_xy_member_inviter');
+PREPARE xy_inviter_fk_stmt FROM @xy_inviter_fk;
+EXECUTE xy_inviter_fk_stmt;
+DEALLOCATE PREPARE xy_inviter_fk_stmt;
 
 CREATE TABLE IF NOT EXISTS xy_membership_plan (
   plan_id BIGINT NOT NULL AUTO_INCREMENT COMMENT '套餐ID',
