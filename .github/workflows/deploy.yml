@@ -45,6 +45,7 @@ jobs:
       TOKEN_SECRET: ci-only-token-secret-must-never-be-used-in-production
       CORS_ALLOWED_ORIGINS: http://localhost:5173
       RUN_XY_INTEGRATION_TESTS: 'true'
+      LOG_PATH: /tmp/diaoxia-test-logs
     steps:
       - name: Checkout
         uses: actions/checkout@v5
