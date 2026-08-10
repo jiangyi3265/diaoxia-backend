@@ -15,7 +15,7 @@ permissions:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -28,7 +28,27 @@ jobs:
           cache: maven
 
       - name: Build and test
-        run: mvn -B clean package
+        run: |
+          mvn -B clean package
+          rm -rf build/deploy
+          mkdir -p build/deploy
+          cd build/deploy
+          jar -xf ../../ruoyi-admin/target/ruoyi-admin.jar
+          tar -czf ../diaoxia-backend-app.tgz BOOT-INF/classes META-INF
+          tar -czf ../diaoxia-backend-lib.tgz BOOT-INF/lib
+          python3 - <<'PY'
+          import hashlib
+          from pathlib import Path
+
+          digest = hashlib.sha256()
+          for path in sorted(Path('BOOT-INF/lib').glob('*.jar')):
+              digest.update(path.name.encode('utf-8'))
+              digest.update(b'\0')
+              with path.open('rb') as handle:
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b''):
+                      digest.update(chunk)
+          Path('../dependency.sha256').write_text(digest.hexdigest() + '\n', encoding='ascii')
+          PY
 
       - name: Configure SSH
         env:
@@ -40,12 +60,27 @@ jobs:
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
 
-      - name: Upload and activate backend
+      - name: Upload changed layers and activate backend
         env:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
         run: |
-          scp -o BatchMode=yes ruoyi-admin/target/ruoyi-admin.jar \
-            "$DEPLOY_USER@$DEPLOY_HOST:/home/deploy/releases/diaoxia-backend.jar.upload"
+          local_hash="$(cat build/dependency.sha256)"
+          remote_hash="$(ssh -o BatchMode=yes "$DEPLOY_USER@$DEPLOY_HOST" \
+            'cat /opt/diaoxia/backend/dependency.sha256 2>/dev/null || true')"
+
+          scp -o BatchMode=yes build/diaoxia-backend-app.tgz \
+            "$DEPLOY_USER@$DEPLOY_HOST:/home/deploy/releases/diaoxia-backend-app.tgz.upload"
+          scp -o BatchMode=yes build/dependency.sha256 \
+            "$DEPLOY_USER@$DEPLOY_HOST:/home/deploy/releases/dependency.sha256.upload"
+
+          if [ "$local_hash" != "$remote_hash" ]; then
+            scp -o BatchMode=yes build/diaoxia-backend-lib.tgz \
+              "$DEPLOY_USER@$DEPLOY_HOST:/home/deploy/releases/diaoxia-backend-lib.tgz.upload"
+          else
+            ssh -o BatchMode=yes "$DEPLOY_USER@$DEPLOY_HOST" \
+              'rm -f /home/deploy/releases/diaoxia-backend-lib.tgz.upload /home/deploy/releases/diaoxia-backend-lib.tgz'
+          fi
+
           ssh -o BatchMode=yes "$DEPLOY_USER@$DEPLOY_HOST" \
-            "mv /home/deploy/releases/diaoxia-backend.jar.upload /home/deploy/releases/diaoxia-backend.jar && sudo /usr/local/sbin/deploy-diaoxia-backend"
+            'mv /home/deploy/releases/diaoxia-backend-app.tgz.upload /home/deploy/releases/diaoxia-backend-app.tgz && mv /home/deploy/releases/dependency.sha256.upload /home/deploy/releases/dependency.sha256 && if [ -f /home/deploy/releases/diaoxia-backend-lib.tgz.upload ]; then mv /home/deploy/releases/diaoxia-backend-lib.tgz.upload /home/deploy/releases/diaoxia-backend-lib.tgz; fi && sudo /usr/local/sbin/deploy-diaoxia-backend'
