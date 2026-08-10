@@ -125,7 +125,10 @@ class XyBusinessFlowIntegrationTest
         String paymentNo = "TP" + suffix.substring(0, 28);
         jdbc.update("insert into xy_payment(payment_no,member_id,business_type,business_id,amount,channel) values(?,?,?,?,?,'WECHAT')",
                 paymentNo, memberId, "ORDER", orderId, paidOrder.get("payableAmount"));
-        service.completeOrderPayment(paymentNo, "wx_test_" + suffix, 1250);
+        int payableCents = new BigDecimal(String.valueOf(paidOrder.get("payableAmount")))
+                .movePointRight(2)
+                .intValueExact();
+        service.completeOrderPayment(paymentNo, "wx_test_" + suffix, payableCents);
         service.shipOrder(String.valueOf(paidOrder.get("orderNo")));
         service.confirmReceipt(memberId, String.valueOf(paidOrder.get("orderNo")));
         String afterSaleNo = service.createAfterSale(memberId, String.valueOf(paidOrder.get("orderNo")), "商品问题", "集成测试售后");
