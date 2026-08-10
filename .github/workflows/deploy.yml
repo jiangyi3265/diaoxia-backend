@@ -69,7 +69,7 @@ jobs:
         run: |
           local_hash="$(cat build/dependency.sha256)"
           remote_hash="$(ssh -o BatchMode=yes "$DEPLOY_USER@$DEPLOY_HOST" \
-            'cat /opt/diaoxia/backend/dependency.sha256 2>/dev/null || true')"
+            'cat /home/deploy/releases/backend-dependency.sha256 2>/dev/null || true')"
 
           scp -o BatchMode=yes build/diaoxia-backend-app.tgz \
             "$DEPLOY_USER@$DEPLOY_HOST:/home/deploy/releases/diaoxia-backend-app.tgz.upload"
