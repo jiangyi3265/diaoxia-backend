@@ -16,6 +16,35 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: diaoxia
+          MYSQL_USER: diaoxia_app
+          MYSQL_PASSWORD: ci-db-password
+          MYSQL_ROOT_PASSWORD: ci-root-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pci-root-password --silent"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    env:
+      DB_URL: jdbc:mysql://127.0.0.1:3306/diaoxia?useUnicode=true&characterEncoding=utf8&zeroDateTimeBehavior=convertToNull&useSSL=false&serverTimezone=Asia%2FShanghai&allowPublicKeyRetrieval=true
+      DB_USERNAME: diaoxia_app
+      DB_PASSWORD: ci-db-password
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: 6379
+      TOKEN_SECRET: ci-only-token-secret-must-never-be-used-in-production
+      CORS_ALLOWED_ORIGINS: http://localhost:5173
+      RUN_XY_INTEGRATION_TESTS: 'true'
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -26,6 +55,11 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: maven
+
+      - name: Initialise isolated business database
+        run: |
+          mysql -h 127.0.0.1 -uroot -pci-root-password diaoxia < sql/ry_20250522.sql
+          mysql -h 127.0.0.1 -uroot -pci-root-password diaoxia < sql/xy_business.sql
 
       - name: Build and test
         run: |

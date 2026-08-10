@@ -3,12 +3,19 @@
     [string]$SshHost = $env:DX_SSH_HOST,
     [string]$SshHostKey = $env:DX_SSH_HOST_KEY,
     [string]$PlinkPath = $env:DX_PLINK_PATH,
+    [string]$RemoteEnvFile = $env:DX_REMOTE_ENV_FILE,
     [switch]$AllowDestructiveRun
 )
 
 $ErrorActionPreference = "Stop"
 $sshPassword = $env:DX_SSH_PASSWORD
 $adminPassword = $env:DX_ADMIN_PASSWORD
+if ([string]::IsNullOrWhiteSpace($RemoteEnvFile)) {
+    $RemoteEnvFile = "/etc/diaoxia/backend.env"
+}
+if ($RemoteEnvFile -notmatch '^/[A-Za-z0-9._/-]+$') {
+    throw "DX_REMOTE_ENV_FILE must be a safe absolute path."
+}
 if (!$AllowDestructiveRun) {
     throw "Pass -AllowDestructiveRun to acknowledge that this test creates and removes remote data."
 }
@@ -77,7 +84,7 @@ function Assert-BusinessRejected(
 try {
     $captchaOriginal = Invoke-Remote "redis-cli GET 'sys_config:sys.account.captchaEnabled'"
     $originalMonthlyPlanValue = Invoke-Remote @"
-set -a; . /etc/dxjava.env; set +a; export MYSQL_PWD="`$DB_PASSWORD"
+set -a; . '$RemoteEnvFile'; set +a; export MYSQL_PWD="`$DB_PASSWORD"
 mysql -u"`$DB_USERNAME" diaoxia -Nse "select plan_id from xy_membership_plan where status='0' and duration_days=30 order by sort_order,plan_id limit 1;"
 "@
     if ($originalMonthlyPlanValue -match '^\d+$') { $originalMonthlyPlanId = [long]$originalMonthlyPlanValue }
@@ -132,7 +139,7 @@ mysql -u"`$DB_USERNAME" diaoxia -Nse "select plan_id from xy_membership_plan whe
 
     Invoke-Remote @"
 set -e
-set -a; . /etc/dxjava.env; set +a
+set -a; . '$RemoteEnvFile'; set +a
 export MYSQL_PWD="`$DB_PASSWORD"
 member_id=`$(mysql -u"`$DB_USERNAME" diaoxia -Nse "insert into xy_member(openid,nickname,mobile,invite_code) values('$openid','E2E','13800000000','T$($suffix.Substring(5))'); select last_insert_id();" | tail -1)
 mysql -u"`$DB_USERNAME" diaoxia -e "insert into xy_membership_card(member_id,plan_id,card_no,start_date,expire_date,status) values(`$member_id,$planId,'E2E$suffix',curdate(),date_add(curdate(),interval 30 day),'ACTIVE');"
@@ -171,7 +178,7 @@ redis-cli SET 'xy:member:token:$appToken' "`${member_id}L" EX 3600 >/dev/null
     Assert-BusinessRejected "未签到前只能保留一个预约" "/app/reservations" "POST" @{ storeId=$storeId; slotId=$slot2; seatId=$seat2; date=$date } $memberHeaders
     Invoke-Business "后台预约签到" "/xy/reservations/verify/$($first.verifyCode)" "POST" @{} $adminHeaders | Out-Null
     Invoke-Remote @"
-set -a; . /etc/dxjava.env; set +a; export MYSQL_PWD="`$DB_PASSWORD"
+set -a; . '$RemoteEnvFile'; set +a; export MYSQL_PWD="`$DB_PASSWORD"
 mysql -u"`$DB_USERNAME" diaoxia -e "update xy_reservation_slot set start_time=time(date_sub(now(),interval 20 minute)),end_time=time(date_add(now(),interval 5 minute)) where slot_id=$slot1;"
 "@ | Out-Null
     $second = Invoke-Business "签到后结束前10分钟续约" "/app/reservations" "POST" @{ storeId=$storeId; slotId=$slot2; seatId=$seat2; date=$date } $memberHeaders
@@ -248,7 +255,7 @@ finally {
     $restoreOriginalPlanSql = if ($null -ne $originalMonthlyPlanId) { "update xy_membership_plan set status='0' where plan_id=$originalMonthlyPlanId;" } else { "" }
     Invoke-Remote @"
 set +e
-set -a; . /etc/dxjava.env; set +a; export MYSQL_PWD="`$DB_PASSWORD"
+set -a; . '$RemoteEnvFile'; set +a; export MYSQL_PWD="`$DB_PASSWORD"
 $captchaRestoreCommand
 redis-cli DEL 'xy:member:token:$appToken' '$adminLoginKey' >/dev/null
 mysql -u"`$DB_USERNAME" diaoxia <<'SQL'
