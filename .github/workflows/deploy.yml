@@ -34,14 +34,16 @@ jobs:
           mkdir -p build/deploy
           cd build/deploy
           jar -xf ../../ruoyi-admin/target/ruoyi-admin.jar
-          tar -czf ../diaoxia-backend-app.tgz BOOT-INF/classes META-INF
-          tar -czf ../diaoxia-backend-lib.tgz BOOT-INF/lib
+          tar -czf ../diaoxia-backend-app.tgz BOOT-INF/classes META-INF BOOT-INF/lib/ruoyi-*.jar
+          tar --exclude='BOOT-INF/lib/ruoyi-*.jar' -czf ../diaoxia-backend-lib.tgz BOOT-INF/lib
           python3 - <<'PY'
           import hashlib
           from pathlib import Path
 
           digest = hashlib.sha256()
-          for path in sorted(Path('BOOT-INF/lib').glob('*.jar')):
+          paths = (path for path in Path('BOOT-INF/lib').glob('*.jar')
+                   if not path.name.startswith('ruoyi-'))
+          for path in sorted(paths, key=lambda item: item.name.lower()):
               digest.update(path.name.encode('utf-8'))
               digest.update(b'\0')
               with path.open('rb') as handle:
