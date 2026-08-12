@@ -100,6 +100,10 @@ token:
 # 钓虾小程序。真实密钥只能通过部署环境变量注入，严禁填写到此文件。
 xy:
   order-expire-minutes: ${XY_ORDER_EXPIRE_MINUTES:30}
+  # 线下待收款独立保留24小时，超时后商品单自动回补库存、开卡单自动关闭。
+  offline-payment-expire-minutes: ${XY_OFFLINE_PAYMENT_EXPIRE_MINUTES:1440}
+  # 防止单个会员通过多笔未付订单长期占用库存。
+  member-pending-order-limit: ${XY_MEMBER_PENDING_ORDER_LIMIT:3}
   maintenance-interval-ms: ${XY_MAINTENANCE_INTERVAL_MS:60000}
   wechat:
     app-id: ${XY_WECHAT_APP_ID:}

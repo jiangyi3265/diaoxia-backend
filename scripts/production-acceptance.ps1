@@ -156,6 +156,22 @@ redis-cli SET 'xy:member:token:$appToken' "`${member_id}L" EX 3600 >/dev/null
     if ($paymentSettings.demoEnabled) {
         $membershipPayment = Invoke-Business "包月会员演示支付" "/app/membership-payments/$planId" "POST" @{} $memberHeaders
         if (!$membershipPayment.demoPayment -or !$membershipPayment.paid) { throw "Membership demo payment mismatch" }
+    } elseif ([string]$paymentSettings.mode -eq "OFFLINE") {
+        if (!$paymentSettings.offlinePaymentEnabled -or $paymentSettings.wechatPayEnabled) { throw "Offline payment settings mismatch" }
+        $membershipPayment = Invoke-Business "包月会员线下付款申请" "/app/membership-payments/$planId" "POST" @{} $memberHeaders
+        $membershipPaymentRetry = Invoke-Business "包月会员线下申请幂等" "/app/membership-payments/$planId" "POST" @{} $memberHeaders
+        if (!$membershipPayment.pendingConfirmation -or $membershipPayment.paid -or
+            [string]$membershipPayment.paymentNo -ne [string]$membershipPaymentRetry.paymentNo -or
+            [string]$membershipPayment.channel -ne "OFFLINE" -or
+            $membershipPayment.PSObject.Properties.Name -notcontains "expiresAutomatically" -or
+            !$membershipPayment.expiresAutomatically -or [int]$membershipPayment.expiresInMinutes -le 0 -or
+            [string]::IsNullOrWhiteSpace([string]$membershipPayment.expireTime)) {
+            throw "Membership offline payment request mismatch"
+        }
+        $pendingOffline = @(Invoke-Business "后台线下待收款列表" "/xy/offline-payments?status=PENDING" "GET" $null $adminHeaders)
+        if (!($pendingOffline | Where-Object { $_.paymentNo -eq $membershipPayment.paymentNo })) { throw "Membership offline payment missing from admin list" }
+        Invoke-Business "后台确认会员线下收款" "/xy/offline-payments/$($membershipPayment.paymentNo)/confirm" "POST" @{} $adminHeaders | Out-Null
+        Invoke-Business "会员线下收款确认幂等" "/xy/offline-payments/$($membershipPayment.paymentNo)/confirm" "POST" @{} $adminHeaders | Out-Null
     } else {
         $limited.Add("包月会员实付：当前非演示模式，需在微信真机手工支付")
     }
@@ -212,6 +228,59 @@ mysql -u"`$DB_USERNAME" diaoxia -e "update xy_reservation_slot set start_time=ti
         $stockProduct = @(Invoke-Business "退款库存读取" "/app/products?productId=$fullPriceProduct" "GET" $null $memberHeaders)[0]
         if ([int]$stockProduct.stock -ne 20) { throw "Refund inventory was not restored" }
         $passed.Add("演示退款幂等库存恢复")
+    } elseif ([string]$paymentSettings.mode -eq "OFFLINE") {
+        $payment = Invoke-Business "商城线下付款申请" "/app/orders/$($order2.orderNo)/payment" "POST" @{} $memberHeaders
+        $paymentRetry = Invoke-Business "商城线下付款申请幂等" "/app/orders/$($order2.orderNo)/payment" "POST" @{} $memberHeaders
+        if (!$payment.pendingConfirmation -or $payment.paid -or
+            [string]$payment.paymentNo -ne [string]$paymentRetry.paymentNo -or
+            [string]$payment.channel -ne "OFFLINE" -or
+            $payment.PSObject.Properties.Name -notcontains "expiresAutomatically" -or
+            !$payment.expiresAutomatically -or [int]$payment.expiresInMinutes -le 0 -or
+            [string]::IsNullOrWhiteSpace([string]$payment.expireTime)) {
+            throw "Order offline payment request mismatch"
+        }
+        $pendingOrder = Invoke-Business "线下待收款订单截止时间" "/app/orders/$($order2.orderNo)" "GET" $null $memberHeaders
+        $pendingBills = @(Invoke-Business "线下待收款账单截止时间" "/app/bills" "GET" $null $memberHeaders)
+        $pendingBill = $pendingBills | Where-Object paymentNo -eq $payment.paymentNo
+        if ([string]$pendingOrder.paymentExpireTime -ne [string]$payment.expireTime -or
+            [string]$pendingBill.expireTime -ne [string]$payment.expireTime) {
+            throw "Offline payment expiry was not preserved in order detail and bills"
+        }
+        Invoke-Business "后台确认商城线下收款" "/xy/offline-payments/$($payment.paymentNo)/confirm" "POST" @{} $adminHeaders | Out-Null
+        Invoke-Business "商城线下收款确认幂等" "/xy/offline-payments/$($payment.paymentNo)/confirm" "POST" @{} $adminHeaders | Out-Null
+        $paidOrder = Invoke-Business "线下收款订单状态" "/app/orders/$($order2.orderNo)" "GET" $null $memberHeaders
+        if ($paidOrder.status -ne "PAID" -or [string]$paidOrder.paymentChannel -ne "OFFLINE") { throw "Offline paid order status mismatch" }
+        $afterSaleNo = Invoke-Business "线下订单退款申请" "/app/orders/$($order2.orderNo)/after-sales" "POST" @{ reason="E2E线下退款"; description="自动验收" } $memberHeaders
+        Invoke-Business "后台批准线下退款" "/xy/after-sales/$afterSaleNo/approve" "POST" @{} $adminHeaders | Out-Null
+        $refundingOrder = Invoke-Business "线下退款不自动标记成功" "/app/orders/$($order2.orderNo)" "GET" $null $memberHeaders
+        if ($refundingOrder.status -ne "AFTER_SALE" -or $refundingOrder.afterSaleStatus -ne "REFUNDING") { throw "Offline refund was completed before actual refund confirmation" }
+        Invoke-Business "后台确认线下已退款" "/xy/after-sales/$afterSaleNo/complete-offline-refund" "POST" @{} $adminHeaders | Out-Null
+        Invoke-Business "线下退款确认幂等" "/xy/after-sales/$afterSaleNo/complete-offline-refund" "POST" @{} $adminHeaders | Out-Null
+        $refundedOrder = Invoke-Business "线下退款订单状态" "/app/orders/$($order2.orderNo)" "GET" $null $memberHeaders
+        if ($refundedOrder.status -ne "REFUNDED" -or $refundedOrder.afterSaleStatus -ne "APPROVED") { throw "Offline refund status mismatch" }
+
+        $order4 = Invoke-Business "已发货退货回库测试下单" "/app/orders" "POST" @{ productId=$fullPriceProduct; quantity=1; deliveryType="PICKUP" } $memberHeaders
+        $payment4 = Invoke-Business "已发货订单线下付款" "/app/orders/$($order4.orderNo)/payment" "POST" @{} $memberHeaders
+        Invoke-Business "后台确认已发货测试单收款" "/xy/offline-payments/$($payment4.paymentNo)/confirm" "POST" @{} $adminHeaders | Out-Null
+        Invoke-Business "后台订单发货" "/xy/orders/$($order4.orderNo)/ship" "POST" @{} $adminHeaders | Out-Null
+        $afterSaleNo4 = Invoke-Business "已发货订单退款申请" "/app/orders/$($order4.orderNo)/after-sales" "POST" @{ reason="E2E已发货退货"; description="自动验收" } $memberHeaders
+        Invoke-Business "后台批准已发货单退款" "/xy/after-sales/$afterSaleNo4/approve" "POST" @{} $adminHeaders | Out-Null
+        Invoke-Business "后台确认已发货单线下退款" "/xy/after-sales/$afterSaleNo4/complete-offline-refund" "POST" @{} $adminHeaders | Out-Null
+        $stockBeforeReturn = @(Invoke-Business "已发货退款不自动回库" "/app/products?productId=$fullPriceProduct" "GET" $null $memberHeaders)[0]
+        if ([int]$stockBeforeReturn.stock -ne 19) { throw "Shipped refund incorrectly restored inventory" }
+        $afterSales = @(Invoke-Business "已发货退货待回库标记" "/xy/after-sales" "GET" $null $adminHeaders)
+        $returnRow = $afterSales | Where-Object { $_.afterSaleNo -eq $afterSaleNo4 }
+        if (!$returnRow.restockRequired -or $returnRow.restocked -or [string]$returnRow.paymentNo -ne [string]$payment4.paymentNo) { throw "Returned-goods restock metadata mismatch" }
+        Invoke-Business "仓库确认退货回库" "/xy/after-sales/$afterSaleNo4/restock" "POST" @{} $adminHeaders | Out-Null
+        Invoke-Business "退货回库幂等" "/xy/after-sales/$afterSaleNo4/restock" "POST" @{} $adminHeaders | Out-Null
+
+        $order3 = Invoke-Business "线下待收款关闭测试下单" "/app/orders" "POST" @{ productId=$fullPriceProduct; quantity=1; deliveryType="PICKUP" } $memberHeaders
+        $payment3 = Invoke-Business "线下待收款关闭测试申请" "/app/orders/$($order3.orderNo)/payment" "POST" @{} $memberHeaders
+        Invoke-Business "后台关闭线下待收款" "/xy/offline-payments/$($payment3.paymentNo)/close" "POST" @{} $adminHeaders | Out-Null
+        Invoke-Business "线下待收款关闭幂等" "/xy/offline-payments/$($payment3.paymentNo)/close" "POST" @{} $adminHeaders | Out-Null
+        $closedOrder = Invoke-Business "线下收款关闭订单状态" "/app/orders/$($order3.orderNo)" "GET" $null $memberHeaders
+        $stockProduct = @(Invoke-Business "线下退款及关闭库存回补" "/app/products?productId=$fullPriceProduct" "GET" $null $memberHeaders)[0]
+        if ($closedOrder.status -ne "CANCELED" -or [int]$stockProduct.stock -ne 20) { throw "Offline close/refund inventory mismatch" }
     } else {
         $limited.Add("微信支付及退款实扣：当前非演示模式，需在微信真机手工支付")
         Invoke-Business "原价订单取消" "/app/orders/$($order2.orderNo)/cancel" "POST" @{} $memberHeaders | Out-Null
@@ -230,7 +299,8 @@ mysql -u"`$DB_USERNAME" diaoxia -e "update xy_reservation_slot set start_time=ti
         @("后台看板", "/xy/dashboard"), @("后台会员", "/xy/members"),
         @("后台预约", "/xy/reservations?date=$date"), @("后台预约配置", "/xy/reservation-configuration"),
         @("后台商品", "/xy/products"), @("后台订单", "/xy/orders"), @("后台售后", "/xy/after-sales"),
-        @("后台财务", "/xy/finance"), @("后台员工", "/xy/staff"), @("后台核销记录", "/xy/verification-records")
+        @("后台财务", "/xy/finance"), @("后台线下流水", "/xy/offline-payments?status=ALL"),
+        @("后台员工", "/xy/staff"), @("后台核销记录", "/xy/verification-records")
     )
     foreach ($read in $adminReads) { Invoke-Business $read[0] $read[1] "GET" $null $adminHeaders | Out-Null }
     Invoke-Business "地址删除" "/app/addresses/$addressId" "DELETE" $null $memberHeaders | Out-Null

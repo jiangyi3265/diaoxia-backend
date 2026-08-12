@@ -264,7 +264,7 @@ CREATE TABLE IF NOT EXISTS xy_after_sale (
   reason VARCHAR(255) NOT NULL COMMENT '原因',
   description_text VARCHAR(1000) DEFAULT NULL COMMENT '说明',
   original_order_status VARCHAR(24) DEFAULT NULL COMMENT '申请售后前订单状态',
-  status VARCHAR(16) NOT NULL DEFAULT 'PENDING' COMMENT '状态：PENDING/REFUNDING/APPROVED/REJECTED/REFUND_FAILED',
+  status VARCHAR(16) NOT NULL DEFAULT 'PENDING' COMMENT '状态：PENDING/REFUNDING/APPROVED/RESTOCKED/REJECTED/REFUND_FAILED',
   refund_no VARCHAR(64) DEFAULT NULL COMMENT '商户退款单号',
   refund_id VARCHAR(64) DEFAULT NULL COMMENT '微信退款单号',
   create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -305,8 +305,8 @@ CREATE TABLE IF NOT EXISTS xy_payment (
   business_type VARCHAR(24) NOT NULL COMMENT '业务类型：MEMBERSHIP/ORDER',
   business_id BIGINT NOT NULL COMMENT '业务主键',
   amount DECIMAL(10,2) NOT NULL COMMENT '支付金额',
-  channel VARCHAR(24) NOT NULL COMMENT '支付渠道：WECHAT',
-  status VARCHAR(16) NOT NULL DEFAULT 'PENDING' COMMENT '状态：PENDING/SUCCESS/CLOSED/REFUNDED',
+  channel VARCHAR(24) NOT NULL COMMENT '支付渠道：WECHAT/OFFLINE/DEMO',
+  status VARCHAR(16) NOT NULL DEFAULT 'PENDING' COMMENT '状态：PENDING/SUCCESS/CLOSED/REFUNDING/REFUNDED',
   transaction_id VARCHAR(64) DEFAULT NULL COMMENT '渠道交易号',
   paid_time DATETIME DEFAULT NULL COMMENT '支付时间',
   create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -373,10 +373,11 @@ FROM (
   SELECT 10011 menu_id, '商品编辑' menu_name, 10005 parent_id, 'xy:product:edit' perms
   UNION ALL SELECT 10012, '预约核销', 10006, 'xy:reservation:verify'
   UNION ALL SELECT 10013, '会员套餐维护', 10002, 'xy:member:plan'
+  UNION ALL SELECT 10014, '线下收退款', 10007, 'xy:finance:collect'
 ) AS permissions
 WHERE NOT EXISTS (SELECT 1 FROM sys_menu existing_menu WHERE existing_menu.menu_id = permissions.menu_id);
 
 INSERT INTO sys_role_menu (role_id, menu_id)
 SELECT 1, menu.menu_id FROM sys_menu menu
-WHERE menu.menu_id BETWEEN 10000 AND 10013
+WHERE menu.menu_id BETWEEN 10000 AND 10014
   AND NOT EXISTS (SELECT 1 FROM sys_role_menu role_menu WHERE role_menu.role_id = 1 AND role_menu.menu_id = menu.menu_id);

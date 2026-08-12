@@ -139,7 +139,7 @@ class XyBusinessFlowIntegrationTest
         service.createOrderPayment(memberId, String.valueOf(refundedOrder.get("orderNo")), payService);
         String refundedAfterSaleNo = service.createAfterSale(memberId, String.valueOf(refundedOrder.get("orderNo")), "退款测试", "模拟支付退款");
         service.approveAfterSale(refundedAfterSaleNo, payService);
-        assertEquals("APPROVED", jdbc.queryForObject("select status from xy_after_sale where after_sale_no=?", String.class, refundedAfterSaleNo));
+        assertEquals("RESTOCKED", jdbc.queryForObject("select status from xy_after_sale where after_sale_no=?", String.class, refundedAfterSaleNo));
         assertEquals("REFUNDED", jdbc.queryForObject("select status from xy_order where order_id=?", String.class, refundedOrder.get("orderId")));
         assertEquals("REFUNDED", jdbc.queryForObject("select status from xy_payment where business_type='ORDER' and business_id=?", String.class, refundedOrder.get("orderId")));
         assertEquals(9, jdbc.queryForObject("select stock from xy_product where product_id=?", Integer.class, productId));

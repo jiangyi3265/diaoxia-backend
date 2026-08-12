@@ -4,6 +4,10 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 import java.util.HashMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -27,6 +31,7 @@ import com.ruoyi.web.service.xy.XyWechatPayService;
 @RequestMapping("/app")
 public class XyAppController
 {
+    private static final Logger log = LoggerFactory.getLogger(XyAppController.class);
     private final XyBusinessService service;
     private final XyWechatService wechatService;
     private final XyWechatPayService wechatPayService;
@@ -77,8 +82,14 @@ public class XyAppController
     public AjaxResult paymentSettings()
     {
         Map<String, Object> result = new HashMap<>();
-        result.put("demoEnabled", wechatPayService.isDemoEnabled());
-        result.put("mode", wechatPayService.isDemoEnabled() ? "DEMO" : "WECHAT");
+        boolean demoEnabled = wechatPayService.isDemoEnabled();
+        boolean wechatPayEnabled = !demoEnabled && wechatPayService.isWechatPayConfigured();
+        result.put("demoEnabled", demoEnabled);
+        result.put("wechatPayEnabled", wechatPayEnabled);
+        result.put("offlinePaymentEnabled", !demoEnabled && !wechatPayEnabled);
+        result.put("mode", demoEnabled ? "DEMO" : wechatPayEnabled ? "WECHAT" : "OFFLINE");
+        if (!demoEnabled && !wechatPayEnabled)
+            result.put("notice", "微信支付暂未开通，请到店付款后由工作人员确认");
         return AjaxResult.success(result);
     }
 
@@ -174,11 +185,48 @@ public class XyAppController
 
     @Anonymous
     @PostMapping("/payments/wechat/notify")
-    public Map<String,String> wechatNotify(@RequestHeader("Wechatpay-Timestamp") String timestamp,@RequestHeader("Wechatpay-Nonce") String nonce,@RequestHeader("Wechatpay-Signature") String signature,@RequestBody String body){Map data=wechatPayService.verifyCallback(timestamp,nonce,signature,body);if(!"SUCCESS".equals(data.get("trade_state")))throw new ServiceException("微信支付未成功");Map amount=(Map)data.get("amount");service.completeOrderPayment(String.valueOf(data.get("out_trade_no")),String.valueOf(data.get("transaction_id")),((Number)amount.get("total")).intValue());Map<String,String> result=new HashMap<>();result.put("code","SUCCESS");result.put("message","成功");return result;}
+    @SuppressWarnings("rawtypes")
+    public ResponseEntity<Map<String,String>> wechatNotify(@RequestHeader("Wechatpay-Timestamp") String timestamp,@RequestHeader("Wechatpay-Nonce") String nonce,@RequestHeader("Wechatpay-Signature") String signature,@RequestBody String body)
+    {
+        try
+        {
+            Map data = wechatPayService.verifyCallback(timestamp, nonce, signature, body);
+            wechatPayService.validateNotificationIdentity(data);
+            if (!"SUCCESS".equals(data.get("trade_state"))) throw new ServiceException("微信支付未成功");
+            Map amount = (Map) data.get("amount");
+            if (amount == null || !(amount.get("total") instanceof Number)) throw new ServiceException("微信支付回调金额缺失");
+            service.completeWechatPayment(String.valueOf(data.get("out_trade_no")), String.valueOf(data.get("transaction_id")), ((Number) amount.get("total")).intValue());
+            return ResponseEntity.ok(callbackResult("SUCCESS", "成功"));
+        }
+        catch (RuntimeException ex)
+        {
+            // 失败必须返回非 2xx，微信平台才会重试；不在日志/响应中暴露回调原文。
+            log.warn("微信支付回调处理失败，异常类型={}", ex.getClass().getSimpleName());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(callbackResult("FAIL", "处理失败"));
+        }
+    }
 
     @Anonymous
     @PostMapping("/payments/wechat/refund-notify")
-    public Map<String,String> wechatRefundNotify(@RequestHeader("Wechatpay-Timestamp")String timestamp,@RequestHeader("Wechatpay-Nonce")String nonce,@RequestHeader("Wechatpay-Signature")String signature,@RequestBody String body){Map data=wechatPayService.verifyCallback(timestamp,nonce,signature,body);String refundNo=String.valueOf(data.get("out_refund_no"));String refundId=String.valueOf(data.get("refund_id"));if("SUCCESS".equals(data.get("refund_status"))){service.completeRefund(refundNo,refundId);}else{service.failRefund(refundNo,refundId);}Map<String,String> result=new HashMap<>();result.put("code","SUCCESS");result.put("message","成功");return result;}
+    @SuppressWarnings("rawtypes")
+    public ResponseEntity<Map<String,String>> wechatRefundNotify(@RequestHeader("Wechatpay-Timestamp")String timestamp,@RequestHeader("Wechatpay-Nonce")String nonce,@RequestHeader("Wechatpay-Signature")String signature,@RequestBody String body)
+    {
+        try
+        {
+            Map data = wechatPayService.verifyCallback(timestamp, nonce, signature, body);
+            wechatPayService.validateNotificationIdentity(data);
+            String refundNo = String.valueOf(data.get("out_refund_no"));
+            String refundId = String.valueOf(data.get("refund_id"));
+            if ("SUCCESS".equals(data.get("refund_status"))) service.completeRefund(refundNo, refundId);
+            else service.failRefund(refundNo, refundId);
+            return ResponseEntity.ok(callbackResult("SUCCESS", "成功"));
+        }
+        catch (RuntimeException ex)
+        {
+            log.warn("微信退款回调处理失败，异常类型={}", ex.getClass().getSimpleName());
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR).body(callbackResult("FAIL", "处理失败"));
+        }
+    }
 
     @Anonymous
     @PostMapping("/orders/{orderNo}/payment")
@@ -210,5 +258,13 @@ public class XyAppController
     private Long requiredLong(Map<String, Object> body, String key)
     {
         try { return Long.valueOf(String.valueOf(body.get(key))); } catch (Exception ex) { throw new ServiceException(key + "不能为空且必须为数字"); }
+    }
+
+    private Map<String,String> callbackResult(String code, String message)
+    {
+        Map<String,String> result = new HashMap<>();
+        result.put("code", code);
+        result.put("message", message);
+        return result;
     }
 }

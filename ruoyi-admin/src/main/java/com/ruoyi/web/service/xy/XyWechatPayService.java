@@ -58,6 +58,35 @@ public class XyWechatPayService
         return properties.isDemoEnabled();
     }
 
+    /**
+     * 只有下单、回调验签和退款需要的生产配置都可用时，才向客户端宣告微信支付可用。
+     * 这可避免“预下单成功但回调无法验签”或“收款后无法退款”的半配置状态。
+     */
+    public boolean isWechatPayConfigured()
+    {
+        return StringUtils.isNotEmpty(properties.getMchId())
+                && StringUtils.isNotEmpty(properties.getMerchantSerialNo())
+                && regularFile(properties.getPrivateKeyPath())
+                && StringUtils.isNotEmpty(properties.getNotifyUrl())
+                && StringUtils.isNotEmpty(properties.getRefundNotifyUrl())
+                && StringUtils.isNotEmpty(properties.getAppId())
+                && properties.getApiV3Key() != null
+                && properties.getApiV3Key().getBytes(StandardCharsets.UTF_8).length == 32
+                && regularFile(properties.getPlatformCertificatePath());
+    }
+
+    /** 验证已解密回调必须属于本商户/小程序，不能只依赖平台签名。 */
+    public void validateNotificationIdentity(Map<?, ?> data)
+    {
+        if (data == null) throw new ServiceException("微信支付回调内容不完整");
+        String mchId = data.get("mchid") == null ? null : String.valueOf(data.get("mchid"));
+        if (StringUtils.isEmpty(mchId) || !mchId.equals(properties.getMchId()))
+            throw new ServiceException("微信支付回调商户号不匹配");
+        Object appIdValue = data.get("appid");
+        if (appIdValue != null && !String.valueOf(appIdValue).equals(properties.getAppId()))
+            throw new ServiceException("微信支付回调 AppID 不匹配");
+    }
+
     public Map<String, Object> jsapi(String orderNo, String openid, int amountFen)
     {
         return jsapi(orderNo, openid, amountFen, "钓虾商城订单");
@@ -235,10 +264,15 @@ public class XyWechatPayService
 
     private void requireCommonConfig()
     {
-        if (StringUtils.isEmpty(properties.getMchId()) || StringUtils.isEmpty(properties.getMerchantSerialNo())
-                || StringUtils.isEmpty(properties.getPrivateKeyPath()) || StringUtils.isEmpty(properties.getAppId())
-                || StringUtils.isEmpty(properties.getPlatformCertificatePath()))
+        if (!isWechatPayConfigured())
             throw new ServiceException("微信支付尚未完成生产配置");
+    }
+
+    private boolean regularFile(String path)
+    {
+        if (StringUtils.isEmpty(path)) return false;
+        try { return Files.isRegularFile(Paths.get(path)); }
+        catch (Exception ex) { return false; }
     }
 
     private String nonce()

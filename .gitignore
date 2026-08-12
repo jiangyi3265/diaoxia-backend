@@ -41,6 +41,13 @@ nbdist/
 *.log
 *.xml.versionsBackup
 *.swp
+deploy.env
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
 
 !*/build/*.java
 !*/build/*.html

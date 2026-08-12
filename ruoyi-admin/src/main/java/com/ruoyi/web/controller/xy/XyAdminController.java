@@ -11,7 +11,9 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import com.ruoyi.common.annotation.Log;
 import com.ruoyi.common.core.domain.AjaxResult;
+import com.ruoyi.common.enums.BusinessType;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.web.service.xy.XyBusinessService;
 import com.ruoyi.web.service.xy.XyWechatPayService;
@@ -84,11 +86,26 @@ public class XyAdminController
     @PreAuthorize("@ss.hasPermi('xy:finance:view')")
     @GetMapping("/finance") public AjaxResult finance() { return AjaxResult.success(service.financeRecords()); }
 
+    @PreAuthorize("@ss.hasPermi('xy:finance:view')")
+    @GetMapping("/offline-payments") public AjaxResult offlinePayments(@RequestParam(required = false) String status) { return AjaxResult.success(service.offlinePayments(status)); }
+
+    @Log(title = "线下收款确认", businessType = BusinessType.UPDATE)
+    @PreAuthorize("@ss.hasPermi('xy:finance:collect')")
+    @PostMapping("/offline-payments/{paymentNo}/confirm") public AjaxResult confirmOfflinePayment(@PathVariable String paymentNo) { return AjaxResult.success(service.confirmOfflinePayment(paymentNo, SecurityUtils.getUsername())); }
+
+    @Log(title = "线下收款关闭", businessType = BusinessType.UPDATE)
+    @PreAuthorize("@ss.hasPermi('xy:finance:collect')")
+    @PostMapping("/offline-payments/{paymentNo}/close") public AjaxResult closeOfflinePayment(@PathVariable String paymentNo) { return AjaxResult.success(service.closeOfflinePayment(paymentNo, SecurityUtils.getUsername())); }
+
     @PreAuthorize("@ss.hasPermi('xy:product:list')") @GetMapping("/orders") public AjaxResult orders(){return AjaxResult.success(service.adminOrders());}
     @PreAuthorize("@ss.hasPermi('xy:product:edit')") @PostMapping("/orders/{orderNo}/ship") public AjaxResult ship(@PathVariable String orderNo){service.shipOrder(orderNo);return AjaxResult.success();}
     @PreAuthorize("@ss.hasPermi('xy:product:list')") @GetMapping("/after-sales") public AjaxResult afterSales(){return AjaxResult.success(service.adminAfterSales());}
     @PreAuthorize("@ss.hasPermi('xy:product:edit')") @PostMapping("/after-sales/{afterSaleNo}/approve") public AjaxResult approveAfterSale(@PathVariable String afterSaleNo){service.approveAfterSale(afterSaleNo,wechatPayService);return AjaxResult.success();}
     @PreAuthorize("@ss.hasPermi('xy:product:edit')") @PostMapping("/after-sales/{afterSaleNo}/reject") public AjaxResult rejectAfterSale(@PathVariable String afterSaleNo){service.rejectAfterSale(afterSaleNo);return AjaxResult.success();}
+    @Log(title = "线下退款确认", businessType = BusinessType.UPDATE)
+    @PreAuthorize("@ss.hasPermi('xy:finance:collect')") @PostMapping("/after-sales/{afterSaleNo}/complete-offline-refund") public AjaxResult completeOfflineRefund(@PathVariable String afterSaleNo){service.completeOfflineRefund(afterSaleNo);return AjaxResult.success();}
+    @Log(title = "退货商品回库", businessType = BusinessType.UPDATE)
+    @PreAuthorize("@ss.hasPermi('xy:product:edit')") @PostMapping("/after-sales/{afterSaleNo}/restock") public AjaxResult restockReturnedAfterSale(@PathVariable String afterSaleNo){service.restockReturnedAfterSale(afterSaleNo);return AjaxResult.success();}
 
     @PreAuthorize("@ss.hasPermi('xy:staff:list')")
     @GetMapping("/staff") public AjaxResult staff() { return AjaxResult.success(service.staffMembers()); }
