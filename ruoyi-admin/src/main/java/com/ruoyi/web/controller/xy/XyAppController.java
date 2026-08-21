@@ -186,7 +186,7 @@ public class XyAppController
     @Anonymous
     @PostMapping("/payments/wechat/notify")
     @SuppressWarnings("rawtypes")
-    public ResponseEntity<Map<String,String>> wechatNotify(@RequestHeader("Wechatpay-Timestamp") String timestamp,@RequestHeader("Wechatpay-Nonce") String nonce,@RequestHeader("Wechatpay-Signature") String signature,@RequestHeader("Wechatpay-Serial") String serial,@RequestBody String body)
+    public ResponseEntity<Map<String,String>> wechatNotify(@RequestHeader(value="Wechatpay-Timestamp",required=false) String timestamp,@RequestHeader(value="Wechatpay-Nonce",required=false) String nonce,@RequestHeader(value="Wechatpay-Signature",required=false) String signature,@RequestHeader(value="Wechatpay-Serial",required=false) String serial,@RequestBody(required=false) String body)
     {
         try
         {
@@ -209,7 +209,7 @@ public class XyAppController
     @Anonymous
     @PostMapping("/payments/wechat/refund-notify")
     @SuppressWarnings("rawtypes")
-    public ResponseEntity<Map<String,String>> wechatRefundNotify(@RequestHeader("Wechatpay-Timestamp")String timestamp,@RequestHeader("Wechatpay-Nonce")String nonce,@RequestHeader("Wechatpay-Signature")String signature,@RequestHeader("Wechatpay-Serial")String serial,@RequestBody String body)
+    public ResponseEntity<Map<String,String>> wechatRefundNotify(@RequestHeader(value="Wechatpay-Timestamp",required=false)String timestamp,@RequestHeader(value="Wechatpay-Nonce",required=false)String nonce,@RequestHeader(value="Wechatpay-Signature",required=false)String signature,@RequestHeader(value="Wechatpay-Serial",required=false)String serial,@RequestBody(required=false) String body)
     {
         try
         {
