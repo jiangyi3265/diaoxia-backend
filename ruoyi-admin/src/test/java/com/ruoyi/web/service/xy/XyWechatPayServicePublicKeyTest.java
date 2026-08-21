@@ -1,6 +1,7 @@
 package com.ruoyi.web.service.xy;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -50,7 +51,10 @@ class XyWechatPayServicePublicKeyTest
         Files.write(publicKeyPath, ("-----BEGIN PUBLIC KEY-----\n" + publicKey
                 + "\n-----END PUBLIC KEY-----\n").getBytes(StandardCharsets.UTF_8));
         Path merchantPrivateKey = tempDir.resolve("apiclient_key.pem");
-        Files.write(merchantPrivateKey, "test-only".getBytes(StandardCharsets.UTF_8));
+        String privateKey = Base64.getMimeEncoder(64, new byte[] {'\n'})
+                .encodeToString(wechatPayKeyPair.getPrivate().getEncoded());
+        Files.write(merchantPrivateKey, ("-----BEGIN PRIVATE KEY-----\n" + privateKey
+                + "\n-----END PRIVATE KEY-----\n").getBytes(StandardCharsets.UTF_8));
 
         properties = new XyWechatPayProperties();
         properties.setMchId("1116741825");
@@ -64,6 +68,27 @@ class XyWechatPayServicePublicKeyTest
         properties.setPublicKeyPath(publicKeyPath.toString());
         properties.setPlatformCertificatePath(tempDir.resolve("missing-platform-cert.pem").toString());
         service = new XyWechatPayService(properties);
+    }
+
+    @Test
+    void signsTheCompleteJsapiPackageValue() throws Exception
+    {
+        String prepayId = "wx-test-prepay-id";
+        Map<String, Object> payment = service.buildJsapiPaymentParameters(prepayId);
+        assertEquals("prepay_id=" + prepayId, payment.get("package"));
+
+        String message = properties.getAppId() + "\n" + payment.get("timeStamp") + "\n"
+                + payment.get("nonceStr") + "\n" + payment.get("package") + "\n";
+        Signature verifier = Signature.getInstance("SHA256withRSA");
+        verifier.initVerify(wechatPayKeyPair.getPublic());
+        verifier.update(message.getBytes(StandardCharsets.UTF_8));
+        assertTrue(verifier.verify(Base64.getDecoder().decode(String.valueOf(payment.get("paySign")))));
+
+        String incompleteMessage = properties.getAppId() + "\n" + payment.get("timeStamp") + "\n"
+                + payment.get("nonceStr") + "\n" + prepayId + "\n";
+        verifier.initVerify(wechatPayKeyPair.getPublic());
+        verifier.update(incompleteMessage.getBytes(StandardCharsets.UTF_8));
+        assertFalse(verifier.verify(Base64.getDecoder().decode(String.valueOf(payment.get("paySign")))));
     }
 
     @Test

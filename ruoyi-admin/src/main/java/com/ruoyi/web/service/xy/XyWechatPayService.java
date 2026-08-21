@@ -114,17 +114,7 @@ public class XyWechatPayService
             Map<?, ?> response = mapper.readValue(raw.getBody(), Map.class);
             if (response.get("prepay_id") == null) throw new ServiceException("微信支付预下单失败");
 
-            String prepay = String.valueOf(response.get("prepay_id"));
-            String timestamp = String.valueOf(Instant.now().getEpochSecond());
-            String nonce = nonce();
-            Map<String, Object> result = new HashMap<>();
-            result.put("appId", properties.getAppId());
-            result.put("timeStamp", timestamp);
-            result.put("nonceStr", nonce);
-            result.put("package", "prepay_id=" + prepay);
-            result.put("signType", "RSA");
-            result.put("paySign", sign(properties.getAppId() + "\n" + timestamp + "\n" + nonce + "\n" + prepay + "\n"));
-            return result;
+            return buildJsapiPaymentParameters(String.valueOf(response.get("prepay_id")));
         }
         catch (ServiceException ex)
         {
@@ -134,6 +124,21 @@ public class XyWechatPayService
         {
             throw new ServiceException("微信支付服务调用失败，请稍后重试");
         }
+    }
+
+    Map<String, Object> buildJsapiPaymentParameters(String prepayId) throws Exception
+    {
+        String timestamp = String.valueOf(Instant.now().getEpochSecond());
+        String nonce = nonce();
+        String paymentPackage = "prepay_id=" + prepayId;
+        Map<String, Object> result = new HashMap<>();
+        result.put("appId", properties.getAppId());
+        result.put("timeStamp", timestamp);
+        result.put("nonceStr", nonce);
+        result.put("package", paymentPackage);
+        result.put("signType", "RSA");
+        result.put("paySign", sign(properties.getAppId() + "\n" + timestamp + "\n" + nonce + "\n" + paymentPackage + "\n"));
+        return result;
     }
 
     public Map<String, Object> refund(String transactionId, String refundNo, int totalFen, int refundFen)
