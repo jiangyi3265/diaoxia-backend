@@ -30,6 +30,9 @@ public class ResourcesConfig implements WebMvcConfigurer
     @Value("${cors.allowed-origins:http://localhost:80,http://127.0.0.1:80,http://localhost:5173,http://127.0.0.1:5173}")
     private String allowedOrigins;
 
+    @Value("${swagger.enabled:false}")
+    private boolean swaggerEnabled;
+
     @Override
     public void addResourceHandlers(ResourceHandlerRegistry registry)
     {
@@ -37,10 +40,18 @@ public class ResourcesConfig implements WebMvcConfigurer
         registry.addResourceHandler(Constants.RESOURCE_PREFIX + "/**")
                 .addResourceLocations("file:" + RuoYiConfig.getProfile() + "/");
 
-        /** swagger配置 */
-        registry.addResourceHandler("/swagger-ui/**")
-                .addResourceLocations("classpath:/META-INF/resources/webjars/springfox-swagger-ui/")
-                .setCacheControl(CacheControl.maxAge(5, TimeUnit.HOURS).cachePublic());
+        /** 随包发布的内置商品/门店图片，小程序与管理端使用同一套可公开访问的地址 */
+        registry.addResourceHandler("/media/**")
+                .addResourceLocations("classpath:/media/")
+                .setCacheControl(CacheControl.maxAge(30, TimeUnit.DAYS).cachePublic());
+
+        /** swagger配置：关闭接口文档时不再对外暴露文档静态页 */
+        if (swaggerEnabled)
+        {
+            registry.addResourceHandler("/swagger-ui/**")
+                    .addResourceLocations("classpath:/META-INF/resources/webjars/springfox-swagger-ui/")
+                    .setCacheControl(CacheControl.maxAge(5, TimeUnit.HOURS).cachePublic());
+        }
     }
 
     /**

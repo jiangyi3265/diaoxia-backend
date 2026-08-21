@@ -1,5 +1,6 @@
 package com.ruoyi.framework.config;
 
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -67,6 +68,12 @@ public class SecurityConfig
     private PermitAllUrlProperties permitAllUrl;
 
     /**
+     * 接口文档开关：关闭时连同 springfox 自带的静态页一起拒绝访问
+     */
+    @Value("${swagger.enabled:false}")
+    private boolean swaggerEnabled;
+
+    /**
      * 身份验证实现
      */
     @Bean
@@ -109,11 +116,17 @@ public class SecurityConfig
             .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
             // 注解标记允许匿名访问的url
             .authorizeHttpRequests((requests) -> {
+                // 生产环境关闭接口文档时，springfox 随包自带的静态页也不对外可达
+                if (!swaggerEnabled)
+                {
+                    requests.antMatchers("/swagger-ui/**", "/swagger-resources/**", "/webjars/springfox-swagger-ui/**",
+                            "/v2/api-docs", "/v3/api-docs/**").denyAll();
+                }
                 permitAllUrl.getUrls().forEach(url -> requests.antMatchers(url).permitAll());
                 // 后台登录及由 X-App-Token 在业务层校验的小程序接口允许匿名访问
                 requests.antMatchers("/login", "/register", "/captchaImage", "/app/**").permitAll()
                     // 静态资源，可匿名访问
-                    .antMatchers(HttpMethod.GET, "/", "/*.html", "/**/*.html", "/**/*.css", "/**/*.js", "/profile/**").permitAll()
+                    .antMatchers(HttpMethod.GET, "/", "/*.html", "/**/*.html", "/**/*.css", "/**/*.js", "/profile/**", "/media/**").permitAll()
                     // 除上面外的所有请求全部需要鉴权认证
                     .anyRequest().authenticated();
             })
