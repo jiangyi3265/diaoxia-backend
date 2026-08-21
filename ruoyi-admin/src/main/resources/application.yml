@@ -122,6 +122,8 @@ xy:
     app-id: ${XY_WECHAT_APP_ID:}
     api-v3-key: ${XY_WECHAT_PAY_API_V3_KEY:}
     platform-certificate-path: ${XY_WECHAT_PAY_PLATFORM_CERT_PATH:}
+    public-key-id: ${XY_WECHAT_PAY_PUBLIC_KEY_ID:}
+    public-key-path: ${XY_WECHAT_PAY_PUBLIC_KEY_PATH:}
 
 # MyBatis配置
 mybatis:

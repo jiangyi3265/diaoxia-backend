@@ -186,11 +186,11 @@ public class XyAppController
     @Anonymous
     @PostMapping("/payments/wechat/notify")
     @SuppressWarnings("rawtypes")
-    public ResponseEntity<Map<String,String>> wechatNotify(@RequestHeader("Wechatpay-Timestamp") String timestamp,@RequestHeader("Wechatpay-Nonce") String nonce,@RequestHeader("Wechatpay-Signature") String signature,@RequestBody String body)
+    public ResponseEntity<Map<String,String>> wechatNotify(@RequestHeader("Wechatpay-Timestamp") String timestamp,@RequestHeader("Wechatpay-Nonce") String nonce,@RequestHeader("Wechatpay-Signature") String signature,@RequestHeader("Wechatpay-Serial") String serial,@RequestBody String body)
     {
         try
         {
-            Map data = wechatPayService.verifyCallback(timestamp, nonce, signature, body);
+            Map data = wechatPayService.verifyCallback(timestamp, nonce, signature, serial, body);
             wechatPayService.validateNotificationIdentity(data);
             if (!"SUCCESS".equals(data.get("trade_state"))) throw new ServiceException("微信支付未成功");
             Map amount = (Map) data.get("amount");
@@ -209,11 +209,11 @@ public class XyAppController
     @Anonymous
     @PostMapping("/payments/wechat/refund-notify")
     @SuppressWarnings("rawtypes")
-    public ResponseEntity<Map<String,String>> wechatRefundNotify(@RequestHeader("Wechatpay-Timestamp")String timestamp,@RequestHeader("Wechatpay-Nonce")String nonce,@RequestHeader("Wechatpay-Signature")String signature,@RequestBody String body)
+    public ResponseEntity<Map<String,String>> wechatRefundNotify(@RequestHeader("Wechatpay-Timestamp")String timestamp,@RequestHeader("Wechatpay-Nonce")String nonce,@RequestHeader("Wechatpay-Signature")String signature,@RequestHeader("Wechatpay-Serial")String serial,@RequestBody String body)
     {
         try
         {
-            Map data = wechatPayService.verifyCallback(timestamp, nonce, signature, body);
+            Map data = wechatPayService.verifyCallback(timestamp, nonce, signature, serial, body);
             wechatPayService.validateNotificationIdentity(data);
             String refundNo = String.valueOf(data.get("out_refund_no"));
             String refundId = String.valueOf(data.get("refund_id"));

@@ -18,6 +18,8 @@ public class XyWechatPayProperties
     private String appId;
     private String apiV3Key;
     private String platformCertificatePath;
+    private String publicKeyId;
+    private String publicKeyPath;
 
     public boolean isDemoEnabled() { return demoEnabled; }
     public void setDemoEnabled(boolean demoEnabled) { this.demoEnabled = demoEnabled; }
@@ -37,4 +39,8 @@ public class XyWechatPayProperties
     public void setApiV3Key(String apiV3Key) { this.apiV3Key = apiV3Key; }
     public String getPlatformCertificatePath() { return platformCertificatePath; }
     public void setPlatformCertificatePath(String platformCertificatePath) { this.platformCertificatePath = platformCertificatePath; }
+    public String getPublicKeyId() { return publicKeyId; }
+    public void setPublicKeyId(String publicKeyId) { this.publicKeyId = publicKeyId; }
+    public String getPublicKeyPath() { return publicKeyPath; }
+    public void setPublicKeyPath(String publicKeyPath) { this.publicKeyPath = publicKeyPath; }
 }

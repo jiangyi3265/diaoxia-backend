@@ -7,10 +7,12 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.security.KeyFactory;
 import java.security.PrivateKey;
+import java.security.PublicKey;
 import java.security.Signature;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.X509EncodedKeySpec;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.Collections;
@@ -72,7 +74,7 @@ public class XyWechatPayService
                 && StringUtils.isNotEmpty(properties.getAppId())
                 && properties.getApiV3Key() != null
                 && properties.getApiV3Key().getBytes(StandardCharsets.UTF_8).length == 32
-                && regularFile(properties.getPlatformCertificatePath());
+                && hasWechatPayVerifier();
     }
 
     /** 验证已解密回调必须属于本商户/小程序，不能只依赖平台签名。 */
@@ -165,7 +167,7 @@ public class XyWechatPayService
         }
     }
 
-    public Map<?, ?> verifyCallback(String timestamp, String nonce, String signature, String body)
+    public Map<?, ?> verifyCallback(String timestamp, String nonce, String signature, String serial, String body)
     {
         try
         {
@@ -174,7 +176,8 @@ public class XyWechatPayService
             long callbackTime = Long.parseLong(timestamp);
             if (Math.abs(Instant.now().getEpochSecond() - callbackTime) > CALLBACK_MAX_AGE_SECONDS)
                 throw new ServiceException("微信支付回调已过期");
-            if (!verifyPlatform(timestamp + "\n" + nonce + "\n" + body + "\n", signature, null))
+            if (StringUtils.isEmpty(serial)) throw new ServiceException("微信支付回调缺少公钥标识");
+            if (!verifyWechatPaySignature(timestamp + "\n" + nonce + "\n" + body + "\n", signature, serial))
                 throw new ServiceException("微信支付回调验签失败");
 
             Map<?, ?> root = mapper.readValue(body, Map.class);
@@ -228,27 +231,44 @@ public class XyWechatPayService
         if (StringUtils.isEmpty(timestamp) || StringUtils.isEmpty(nonce) || StringUtils.isEmpty(signature) || StringUtils.isEmpty(serial))
             throw new ServiceException("微信支付响应缺少签名");
         String body = response.getBody() == null ? "" : response.getBody();
-        if (!verifyPlatform(timestamp + "\n" + nonce + "\n" + body + "\n", signature, serial))
+        if (!verifyWechatPaySignature(timestamp + "\n" + nonce + "\n" + body + "\n", signature, serial))
             throw new ServiceException("微信支付响应验签失败");
     }
 
-    private boolean verifyPlatform(String message, String signature, String expectedSerial) throws Exception
+    private boolean verifyWechatPaySignature(String message, String signature, String expectedSerial) throws Exception
     {
-        if (StringUtils.isEmpty(properties.getPlatformCertificatePath()))
-            throw new ServiceException("微信支付平台证书未配置");
-        try (InputStream input = Files.newInputStream(Paths.get(properties.getPlatformCertificatePath())))
+        if (StringUtils.isEmpty(expectedSerial)) throw new ServiceException("微信支付响应缺少公钥标识");
+        PublicKey verificationKey;
+        if (expectedSerial.startsWith("PUB_KEY_ID_"))
         {
-            X509Certificate certificate = (X509Certificate) CertificateFactory.getInstance("X.509").generateCertificate(input);
-            if (StringUtils.isNotEmpty(expectedSerial))
+            if (!expectedSerial.equals(properties.getPublicKeyId()) || !regularFile(properties.getPublicKeyPath()))
+                return false;
+            verificationKey = readPublicKey(properties.getPublicKeyPath());
+        }
+        else
+        {
+            if (!regularFile(properties.getPlatformCertificatePath())) return false;
+            try (InputStream input = Files.newInputStream(Paths.get(properties.getPlatformCertificatePath())))
             {
+                X509Certificate certificate = (X509Certificate) CertificateFactory.getInstance("X.509").generateCertificate(input);
                 BigInteger serial = certificate.getSerialNumber();
                 if (!serial.toString(16).equalsIgnoreCase(expectedSerial)) return false;
+                verificationKey = certificate.getPublicKey();
             }
-            Signature verifier = Signature.getInstance("SHA256withRSA");
-            verifier.initVerify(certificate.getPublicKey());
-            verifier.update(message.getBytes(StandardCharsets.UTF_8));
-            return verifier.verify(Base64.getDecoder().decode(signature));
         }
+        Signature verifier = Signature.getInstance("SHA256withRSA");
+        verifier.initVerify(verificationKey);
+        verifier.update(message.getBytes(StandardCharsets.UTF_8));
+        return verifier.verify(Base64.getDecoder().decode(signature));
+    }
+
+    private PublicKey readPublicKey(String path) throws Exception
+    {
+        String pem = new String(Files.readAllBytes(Paths.get(path)), StandardCharsets.UTF_8)
+                .replace("-----BEGIN PUBLIC KEY-----", "")
+                .replace("-----END PUBLIC KEY-----", "")
+                .replaceAll("\\s", "");
+        return KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(Base64.getDecoder().decode(pem)));
     }
 
     private String sign(String value) throws Exception
@@ -273,6 +293,14 @@ public class XyWechatPayService
         if (StringUtils.isEmpty(path)) return false;
         try { return Files.isRegularFile(Paths.get(path)); }
         catch (Exception ex) { return false; }
+    }
+
+    private boolean hasWechatPayVerifier()
+    {
+        boolean publicKeyReady = StringUtils.isNotEmpty(properties.getPublicKeyId())
+                && properties.getPublicKeyId().startsWith("PUB_KEY_ID_")
+                && regularFile(properties.getPublicKeyPath());
+        return publicKeyReady || regularFile(properties.getPlatformCertificatePath());
     }
 
     private String nonce()
