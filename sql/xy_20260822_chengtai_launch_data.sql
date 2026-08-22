@@ -1,9 +1,9 @@
 -- 2026-08-22：成泰钓虾俱乐部上线业务数据。
 --
--- 内容：正式门店、6 个可预约时段、17 个钓位、包月会员价 88 元、下架 7 个演示商品。
+-- 内容：正式门店、6 个可预约时段、18 个钓位、包月会员价 88 元、下架 7 个演示商品。
 -- 全部幂等，可重复执行。执行前请先备份数据库。
 --
--- 执行后请核对文件末尾的核对查询：时段应为 6、钓位应为 17、会员价应为 88.00。
+-- 执行后请核对文件末尾的核对查询：时段应为 6、钓位应为 18、会员价应为 88.00。
 
 SET NAMES utf8mb4;
 
@@ -40,7 +40,7 @@ INSERT IGNORE INTO xy_reservation_slot(store_id, start_time, end_time, status, s
   (@store_id, '20:00:00', '22:00:00', '0', 60);
 
 -- ---------------------------------------------------------------
--- 3. 钓位：池两侧 1-8 与 10-18，共 17 个（按门店图纸跳过 9 号）
+-- 3. 钓位：池两侧 1-18，共 18 个
 --    uk_xy_seat_code(store_id,seat_code) 保证重复执行不会插入重复钓位
 -- ---------------------------------------------------------------
 INSERT IGNORE INTO xy_seat(store_id, seat_code, zone_name, status, sort_order) VALUES
@@ -52,6 +52,7 @@ INSERT IGNORE INTO xy_seat(store_id, seat_code, zone_name, status, sort_order) V
   (@store_id, '6',  NULL, '0', 6),
   (@store_id, '7',  NULL, '0', 7),
   (@store_id, '8',  NULL, '0', 8),
+  (@store_id, '9',  NULL, '0', 9),
   (@store_id, '10', NULL, '0', 10),
   (@store_id, '11', NULL, '0', 11),
   (@store_id, '12', NULL, '0', 12),
@@ -84,6 +85,6 @@ WHERE product_name IN (
 -- ---------------------------------------------------------------
 SELECT store_id, store_name, address, phone, business_hours, status FROM xy_store WHERE store_id = @store_id;
 SELECT COUNT(*) AS `可预约时段数（应为6）` FROM xy_reservation_slot WHERE store_id = @store_id AND status = '0';
-SELECT COUNT(*) AS `可用钓位数（应为17）`  FROM xy_seat             WHERE store_id = @store_id AND status = '0';
+SELECT COUNT(*) AS `可用钓位数（应为18）`  FROM xy_seat             WHERE store_id = @store_id AND status = '0';
 SELECT plan_id, plan_name, amount, duration_days, status FROM xy_membership_plan WHERE duration_days = 30;
 SELECT COUNT(*) AS `在售商品数（应为0）`   FROM xy_product          WHERE status = '0';
