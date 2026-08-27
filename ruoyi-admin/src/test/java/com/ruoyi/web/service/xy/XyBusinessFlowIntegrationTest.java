@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -98,6 +99,24 @@ class XyBusinessFlowIntegrationTest
         assertNotNull(service.saveAddress(memberId, address));
 
         LocalDate tomorrow = LocalDate.now().plusDays(1);
+        Map<String, Object> pauseInput = new HashMap<>();
+        List<Long> pausedSlotIds = new ArrayList<>();
+        pausedSlotIds.add(slotId);
+        pauseInput.put("storeId", storeId);
+        pauseInput.put("pauseDate", tomorrow.toString());
+        pauseInput.put("slotIds", pausedSlotIds);
+        pauseInput.put("announcement", "设备维护，当前时段暂停预约");
+        Map<String, Object> savedPause = service.saveReservationPause(pauseInput, "integration-test");
+        Map<String, Object> pausedAvailability = service.reservationAvailability(storeId, tomorrow);
+        List<Map<String, Object>> pausedSlots = (List<Map<String, Object>>) pausedAvailability.get("slots");
+        assertEquals(true, pausedSlots.get(0).get("paused"));
+        assertEquals(false, pausedSlots.get(0).get("bookable"));
+        assertEquals(1, ((List<?>) pausedAvailability.get("pauseAnnouncements")).size());
+        assertThrows(ServiceException.class, () -> service.createReservation(memberId, storeId, slotId, seatId, tomorrow));
+        assertTrue(service.adminReservationPauses().stream().anyMatch(row -> savedPause.get("batchNo").equals(row.get("batchNo"))));
+        service.resumeReservationPause(String.valueOf(savedPause.get("batchNo")));
+        assertEquals(false, ((List<Map<String, Object>>) service.reservationAvailability(storeId, tomorrow).get("slots")).get(0).get("paused"));
+
         Map<String, Object> firstReservation = service.createReservation(memberId, storeId, slotId, seatId, tomorrow);
         assertThrows(ServiceException.class, () -> service.createReservation(memberId, storeId, slotId, seatId, tomorrow));
         assertThrows(ServiceException.class, () -> service.createReservation(memberId, storeId, slotId, seatId, tomorrow.plusDays(1)));

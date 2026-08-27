@@ -381,12 +381,27 @@ public class XyBusinessService
         Map<String, Object> result = new HashMap<>();
         result.put("date", reservationDate.toString());
         List<Map<String, Object>> slots = jdbcTemplate.queryForList("select s.slot_id as slotId, date_format(s.start_time, '%H:%i') as startTime, date_format(s.end_time, '%H:%i') as endTime, (select count(1) from xy_reservation r where r.slot_id = s.slot_id and r.reservation_date = ? and r.seat_lock = 1) as bookedCount, (select count(1) from xy_seat se where se.store_id = s.store_id and se.status = '0') as totalCount from xy_reservation_slot s where s.store_id = ? and s.status = '0' order by s.sort_order, s.start_time", reservationDate, storeId);
+        List<Map<String, Object>> pauses = jdbcTemplate.queryForList(
+                "select p.slot_id as slotId,p.announcement,date_format(s.start_time,'%H:%i') as startTime,date_format(s.end_time,'%H:%i') as endTime "
+                        + "from xy_reservation_pause p join xy_reservation_slot s on s.slot_id=p.slot_id "
+                        + "where p.store_id=? and p.pause_date=? order by s.sort_order,s.start_time",
+                storeId, reservationDate);
+        Map<Long, String> pausedSlots = new HashMap<>();
+        for (Map<String, Object> pause : pauses)
+        {
+            pausedSlots.put(((Number) pause.get("slotId")).longValue(), String.valueOf(pause.get("announcement")));
+        }
         for (Map<String, Object> slot : slots)
         {
-            boolean bookable = !reservationDate.equals(LocalDate.now()) || LocalTime.now().isBefore(LocalTime.parse(String.valueOf(slot.get("startTime"))));
+            Long slotId = ((Number) slot.get("slotId")).longValue();
+            boolean paused = pausedSlots.containsKey(slotId);
+            boolean bookable = (!reservationDate.equals(LocalDate.now()) || LocalTime.now().isBefore(LocalTime.parse(String.valueOf(slot.get("startTime"))))) && !paused;
             slot.put("bookable", bookable);
+            slot.put("paused", paused);
+            if (paused) slot.put("pauseAnnouncement", pausedSlots.get(slotId));
         }
         result.put("slots", slots);
+        result.put("pauseAnnouncements", pauses);
         result.put("seats", jdbcTemplate.queryForList("select se.seat_id as seatId, se.seat_code as seatCode, se.zone_name as zoneName, coalesce(group_concat(r.slot_id), '') as bookedSlotIds from xy_seat se left join xy_reservation r on r.seat_id=se.seat_id and r.reservation_date=? and r.seat_lock=1 where se.store_id=? and se.status='0' group by se.seat_id, se.seat_code, se.zone_name, se.sort_order order by se.sort_order, se.seat_code", reservationDate, storeId));
         result.put("sameDayRolloverRule", "每位会员同时只能保留1个待到场预约；到店签到后，自当前场次结束前10分钟起，可不限次续约当天更晚的空余时段");
         return result;
@@ -408,10 +423,20 @@ public class XyBusinessService
         }
         // 串行化同一会员的预约请求，防止连续点击或并发请求绕过单预约限制。
         jdbcTemplate.queryForObject("select member_id from xy_member where member_id=? for update", Long.class, memberId);
+        List<Long> lockedStores = jdbcTemplate.queryForList(
+                "select store_id from xy_store where store_id=? and status='0' for update", Long.class, storeId);
+        if (lockedStores.isEmpty()) throw new ServiceException("门店不存在或暂未营业");
         List<Map<String, Object>> slotRows = jdbcTemplate.queryForList(
                 "select s.start_time,s.end_time from xy_reservation_slot s join xy_store st on st.store_id=s.store_id and st.status='0' where s.slot_id=? and s.store_id=? and s.status='0'",
                 slotId, storeId);
         if (slotRows.isEmpty()) throw new ServiceException("选择的时段不可用");
+        List<String> pauseAnnouncements = jdbcTemplate.queryForList(
+                "select announcement from xy_reservation_pause where store_id=? and slot_id=? and pause_date=? limit 1",
+                String.class, storeId, slotId, reservationDate);
+        if (!pauseAnnouncements.isEmpty())
+        {
+            throw new ServiceException("该时段暂停预约：" + pauseAnnouncements.get(0));
+        }
         LocalTime targetStart = ((java.sql.Time) slotRows.get(0).get("start_time")).toLocalTime();
         if (reservationDate.equals(LocalDate.now()) && !LocalTime.now().isBefore(targetStart))
         {
@@ -1181,6 +1206,78 @@ public class XyBusinessService
         if (StringUtils.isNotEmpty(status)) { sql += " and r.status=?"; args.add(status); }
         sql += " order by s.start_time, se.sort_order";
         return jdbcTemplate.queryForList(sql, args.toArray());
+    }
+
+    public List<Map<String, Object>> adminReservationPauses()
+    {
+        return jdbcTemplate.queryForList(
+                "select p.pause_batch_no as batchNo,p.store_id as storeId,st.store_name as storeName,p.pause_date as pauseDate,p.announcement,"
+                        + "group_concat(p.slot_id order by s.start_time separator ',') as slotIds,"
+                        + "group_concat(concat(date_format(s.start_time,'%H:%i'),'-',date_format(s.end_time,'%H:%i')) order by s.start_time separator '、') as slotTimes,"
+                        + "count(p.pause_id) as slotCount,sum((select count(1) from xy_reservation r where r.slot_id=p.slot_id and r.reservation_date=p.pause_date and r.status in ('BOOKED','CHECKED_IN'))) as existingReservationCount,"
+                        + "max(p.create_by) as createBy,min(p.create_time) as createTime "
+                        + "from xy_reservation_pause p join xy_store st on st.store_id=p.store_id "
+                        + "join xy_reservation_slot s on s.slot_id=p.slot_id "
+                        + "where p.pause_date>=curdate() group by p.pause_batch_no,p.store_id,st.store_name,p.pause_date,p.announcement "
+                        + "order by p.pause_date,min(s.start_time),p.pause_batch_no");
+    }
+
+    @Transactional
+    public Map<String, Object> saveReservationPause(Map<String, Object> input, String operator)
+    {
+        Long storeId = number(input.get("storeId"));
+        if (storeId == null) throw new ServiceException("请选择暂停预约的门店");
+        LocalDate pauseDate;
+        try { pauseDate = LocalDate.parse(required(input, "pauseDate", "请选择暂停日期")); }
+        catch (Exception ex) { throw new ServiceException("暂停日期格式必须为 yyyy-MM-dd"); }
+        validateReservationDate(pauseDate);
+        String announcement = required(input, "announcement", "请填写展示给顾客的暂停公告");
+        checkLength(announcement, 500, "暂停公告不能超过500个字符");
+        Object rawSlotIds = input.get("slotIds");
+        if (!(rawSlotIds instanceof List)) throw new ServiceException("请至少选择一个暂停时段");
+        List<Long> slotIds = new ArrayList<>();
+        for (Object rawSlotId : (List<?>) rawSlotIds)
+        {
+            Long slotId = number(rawSlotId);
+            if (slotId != null && !slotIds.contains(slotId)) slotIds.add(slotId);
+        }
+        if (slotIds.isEmpty()) throw new ServiceException("请至少选择一个暂停时段");
+
+        List<Long> lockedStores = jdbcTemplate.queryForList(
+                "select store_id from xy_store where store_id=? for update", Long.class, storeId);
+        if (lockedStores.isEmpty()) throw new ServiceException("门店不存在");
+        String batchNo = nextNo("RP");
+        int existingReservations = 0;
+        for (Long slotId : slotIds)
+        {
+            Integer validSlot = jdbcTemplate.queryForObject(
+                    "select count(1) from xy_reservation_slot where slot_id=? and store_id=? and status='0'",
+                    Integer.class, slotId, storeId);
+            if (validSlot == null || validSlot == 0) throw new ServiceException("所选时段不存在或已停用，请刷新后重试");
+            Integer booked = jdbcTemplate.queryForObject(
+                    "select count(1) from xy_reservation where slot_id=? and reservation_date=? and status in ('BOOKED','CHECKED_IN')",
+                    Integer.class, slotId, pauseDate);
+            existingReservations += booked == null ? 0 : booked;
+            jdbcTemplate.update(
+                    "insert into xy_reservation_pause(pause_batch_no,store_id,slot_id,pause_date,announcement,create_by) values(?,?,?,?,?,?) "
+                            + "on duplicate key update pause_batch_no=values(pause_batch_no),store_id=values(store_id),announcement=values(announcement),create_by=values(create_by),update_time=now()",
+                    batchNo, storeId, slotId, pauseDate, announcement, operator);
+        }
+        Map<String, Object> result = new HashMap<>();
+        result.put("batchNo", batchNo);
+        result.put("pauseDate", pauseDate.toString());
+        result.put("slotCount", slotIds.size());
+        result.put("existingReservationCount", existingReservations);
+        return result;
+    }
+
+    @Transactional
+    public void resumeReservationPause(String batchNo)
+    {
+        String normalized = StringUtils.trim(batchNo);
+        if (StringUtils.isEmpty(normalized) || normalized.length() > 40) throw new ServiceException("暂停记录编号不合法");
+        int deleted = jdbcTemplate.update("delete from xy_reservation_pause where pause_batch_no=?", normalized);
+        if (deleted == 0) throw new ServiceException("暂停记录不存在或已恢复");
     }
 
     @Transactional

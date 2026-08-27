@@ -78,6 +78,17 @@ public class XyAdminController
     @PutMapping("/reservation-slots") public AjaxResult updateSlot(@RequestBody Map<String, Object> body) { return AjaxResult.success(service.saveSlot(body)); }
 
     @PreAuthorize("@ss.hasPermi('xy:reservation:config')")
+    @GetMapping("/reservation-pauses") public AjaxResult reservationPauses() { return AjaxResult.success(service.adminReservationPauses()); }
+
+    @Log(title = "暂停预约", businessType = BusinessType.INSERT)
+    @PreAuthorize("@ss.hasPermi('xy:reservation:config')")
+    @PostMapping("/reservation-pauses") public AjaxResult createReservationPause(@RequestBody Map<String, Object> body) { return AjaxResult.success(service.saveReservationPause(body, SecurityUtils.getUsername())); }
+
+    @Log(title = "恢复预约", businessType = BusinessType.DELETE)
+    @PreAuthorize("@ss.hasPermi('xy:reservation:config')")
+    @DeleteMapping("/reservation-pauses/{batchNo}") public AjaxResult resumeReservationPause(@PathVariable String batchNo) { service.resumeReservationPause(batchNo); return AjaxResult.success(); }
+
+    @PreAuthorize("@ss.hasPermi('xy:reservation:config')")
     @PostMapping("/seats") public AjaxResult createSeat(@RequestBody Map<String, Object> body) { return AjaxResult.success(service.saveSeat(body)); }
 
     @PreAuthorize("@ss.hasPermi('xy:reservation:config')")
