@@ -2,7 +2,9 @@ package com.ruoyi.web.controller.xy;
 
 import java.time.LocalDate;
 import java.util.Map;
+import javax.servlet.http.HttpServletResponse;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -15,6 +17,8 @@ import com.ruoyi.common.annotation.Log;
 import com.ruoyi.common.core.domain.AjaxResult;
 import com.ruoyi.common.enums.BusinessType;
 import com.ruoyi.common.exception.ServiceException;
+import com.ruoyi.common.utils.poi.ExcelUtil;
+import com.ruoyi.web.domain.xy.XyFinanceExportRow;
 import com.ruoyi.web.service.xy.XyBusinessService;
 import com.ruoyi.web.service.xy.XyWechatPayService;
 import com.ruoyi.common.utils.SecurityUtils;
@@ -33,6 +37,18 @@ public class XyAdminController
 
     @PreAuthorize("@ss.hasPermi('xy:member:list')")
     @GetMapping("/members") public AjaxResult members(@RequestParam(required = false) String keyword) { return AjaxResult.success(service.adminMembers(keyword)); }
+
+    @Log(title = "会员管理", businessType = BusinessType.INSERT)
+    @PreAuthorize("@ss.hasPermi('xy:member:edit')")
+    @PostMapping("/members") public AjaxResult createMember(@RequestBody Map<String, Object> body) { return AjaxResult.success(service.saveAdminMember(null, body)); }
+
+    @Log(title = "会员管理", businessType = BusinessType.UPDATE)
+    @PreAuthorize("@ss.hasPermi('xy:member:edit')")
+    @PutMapping("/members/{memberId}") public AjaxResult updateMember(@PathVariable Long memberId, @RequestBody Map<String, Object> body) { return AjaxResult.success(service.saveAdminMember(memberId, body)); }
+
+    @Log(title = "会员管理", businessType = BusinessType.DELETE)
+    @PreAuthorize("@ss.hasPermi('xy:member:edit')")
+    @DeleteMapping("/members/{memberId}") public AjaxResult deleteMember(@PathVariable Long memberId) { service.deleteAdminMember(memberId); return AjaxResult.success(); }
 
     @PreAuthorize("@ss.hasPermi('xy:reservation:list')")
     @GetMapping("/reservations") public AjaxResult reservations(@RequestParam String date, @RequestParam(required = false) String status) { return AjaxResult.success(service.adminReservations(parseDate(date), status)); }
@@ -85,6 +101,15 @@ public class XyAdminController
 
     @PreAuthorize("@ss.hasPermi('xy:finance:view')")
     @GetMapping("/finance") public AjaxResult finance() { return AjaxResult.success(service.financeRecords()); }
+
+    @Log(title = "财务对账", businessType = BusinessType.EXPORT)
+    @PreAuthorize("@ss.hasPermi('xy:finance:view')")
+    @PostMapping("/finance/export")
+    public void exportFinance(HttpServletResponse response)
+    {
+        new ExcelUtil<XyFinanceExportRow>(XyFinanceExportRow.class)
+                .exportExcel(response, service.financeExportRows(), "财务对账");
+    }
 
     @PreAuthorize("@ss.hasPermi('xy:finance:view')")
     @GetMapping("/offline-payments") public AjaxResult offlinePayments(@RequestParam(required = false) String status) { return AjaxResult.success(service.offlinePayments(status)); }

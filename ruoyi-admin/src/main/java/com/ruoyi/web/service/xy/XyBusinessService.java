@@ -23,6 +23,7 @@ import org.springframework.transaction.annotation.Transactional;
 import com.ruoyi.common.core.redis.RedisCache;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.common.utils.StringUtils;
+import com.ruoyi.web.domain.xy.XyFinanceExportRow;
 
 /**
  * 钓虾核心业务服务。
@@ -346,6 +347,11 @@ public class XyBusinessService
         if (card == null)
         {
             throw new ServiceException("请先开通有效会员卡");
+        }
+        LocalDate cardExpireDate = toLocalDate(card.get("expireDate"));
+        if (cardExpireDate == null || reservationDate.isAfter(cardExpireDate))
+        {
+            throw new ServiceException("会员有效期至 " + (cardExpireDate == null ? "未知日期" : cardExpireDate) + "，不能预约有效期之后的场次");
         }
         // 串行化同一会员的预约请求，防止连续点击或并发请求绕过单预约限制。
         jdbcTemplate.queryForObject("select member_id from xy_member where member_id=? for update", Long.class, memberId);
@@ -918,7 +924,7 @@ public class XyBusinessService
         if (StringUtils.isNotEmpty(previousCode)) redisCache.deleteObject(MEMBER_VERIFY_PREFIX + previousCode);
 
         String code;
-        do { code = randomDigits(8); } while (redisCache.getCacheObject(MEMBER_VERIFY_PREFIX + code) != null);
+        do { code = randomDigits(4); } while (redisCache.getCacheObject(MEMBER_VERIFY_PREFIX + code) != null);
         redisCache.setCacheObject(MEMBER_VERIFY_PREFIX + code, memberId, MEMBER_VERIFY_EXPIRES_SECONDS, TimeUnit.SECONDS);
         redisCache.setCacheObject(memberCodeKey, code, MEMBER_VERIFY_EXPIRES_SECONDS, TimeUnit.SECONDS);
 
@@ -930,18 +936,32 @@ public class XyBusinessService
     }
 
     @Transactional
-    public Map<String,Object> verifyMemberCode(String code,String operator)
+    public synchronized Map<String,Object> verifyMemberCode(String code,String operator)
     {
+        if (code == null || !code.matches("^\\d{4}$")) throw new ServiceException("请输入4位会员码");
         Long memberId = redisCache.getCacheObject(MEMBER_VERIFY_PREFIX + code);
-        if (memberId == null) throw new ServiceException("会员二维码无效或已过期");
+        if (memberId == null) throw new ServiceException("会员码无效或已过期");
         String memberCodeKey = MEMBER_VERIFY_MEMBER_PREFIX + memberId;
         String currentCode = redisCache.getCacheObject(memberCodeKey);
-        if (!code.equals(currentCode)) throw new ServiceException("会员二维码已更新，请扫描最新二维码");
+        if (!code.equals(currentCode)) throw new ServiceException("会员码已更新，请输入最新4位会员码");
 
         Map<String,Object> member = memberProfile(memberId);
+        List<Long> reservationIds = jdbcTemplate.query(
+                "select r.reservation_id from xy_reservation r join xy_reservation_slot s on s.slot_id=r.slot_id "
+                        + "where r.member_id=? and r.reservation_date=curdate() and r.status='BOOKED' "
+                        + "order by s.start_time limit 1 for update",
+                (rs, rowNum) -> rs.getLong(1), memberId);
+        boolean reservationCheckedIn = false;
+        if (!reservationIds.isEmpty())
+        {
+            reservationCheckedIn = jdbcTemplate.update(
+                    "update xy_reservation set status='CHECKED_IN',checkin_time=now() where reservation_id=? and status='BOOKED'",
+                    reservationIds.get(0)) == 1;
+        }
         jdbcTemplate.update("insert into xy_member_visit(member_id,verify_code,verified_by) values(?,?,?)",memberId,code,operator);
         redisCache.deleteObject(MEMBER_VERIFY_PREFIX + code);
         redisCache.deleteObject(memberCodeKey);
+        member.put("reservationCheckedIn", reservationCheckedIn);
         return member;
     }
 
@@ -981,11 +1001,52 @@ public class XyBusinessService
 
     public List<Map<String, Object>> adminMembers(String keyword)
     {
-        String sql = "select m.member_id as memberId, m.nickname, m.mobile, m.invite_code as inviteCode, m.status, m.create_time as createTime, c.card_no as cardNo, c.expire_date as expireDate, c.status as cardStatus, inviter.nickname as inviterNickname, inviter.invite_code as inviterInviteCode from xy_member m left join xy_member inviter on inviter.member_id=m.inviter_member_id left join xy_membership_card c on c.card_id=(select c2.card_id from xy_membership_card c2 where c2.member_id=m.member_id order by c2.expire_date desc limit 1) where 1=1";
+        String sql = "select m.member_id as memberId, m.nickname, m.mobile, m.invite_code as inviteCode, m.status as memberStatus, m.create_time as createTime, c.card_id as cardId, c.card_no as cardNo, c.start_date as startDate, c.expire_date as expireDate, case when c.card_id is null then 'NONE' when c.status<>'ACTIVE' then c.status when c.expire_date<curdate() then 'EXPIRED' when c.start_date>curdate() then 'PENDING' else 'ACTIVE' end as cardStatus, inviter.nickname as inviterNickname, inviter.invite_code as inviterInviteCode from xy_member m left join xy_member inviter on inviter.member_id=m.inviter_member_id left join xy_membership_card c on c.card_id=(select c2.card_id from xy_membership_card c2 where c2.member_id=m.member_id order by c2.expire_date desc limit 1) where 1=1";
         List<Object> args = new ArrayList<>();
         if (StringUtils.isNotEmpty(keyword)) { sql += " and (m.nickname like ? or m.mobile like ? or m.invite_code like ?)"; args.add("%" + keyword + "%"); args.add("%" + keyword + "%"); args.add("%" + keyword + "%"); }
         sql += " order by m.create_time desc";
         return jdbcTemplate.queryForList(sql, args.toArray());
+    }
+
+    @Transactional
+    public Long saveAdminMember(Long memberId, Map<String, Object> input)
+    {
+        String nickname = required(input, "nickname", "会员昵称不能为空");
+        checkLength(nickname, 100, "会员昵称不能超过100个字符");
+        String mobile = optionalText(input, "mobile", 32, "手机号不能超过32个字符");
+        if (mobile != null && !mobile.matches("^1\\d{10}$")) throw new ServiceException("手机号格式不正确");
+        String status = "1".equals(String.valueOf(input.get("memberStatus"))) ? "1" : "0";
+        if (memberId == null)
+        {
+            String openid = "manual_" + UUID.randomUUID().toString().replace("-", "");
+            jdbcTemplate.update(
+                    "insert into xy_member(openid,nickname,mobile,invite_code,status) values(?,?,?,?,?)",
+                    openid, nickname, mobile, generateInviteCode(), status);
+            return jdbcTemplate.queryForObject("select last_insert_id()", Long.class);
+        }
+        int updated = jdbcTemplate.update(
+                "update xy_member set nickname=?,mobile=?,status=? where member_id=?",
+                nickname, mobile, status, memberId);
+        if (updated != 1) throw new ServiceException("会员不存在");
+        return memberId;
+    }
+
+    @Transactional
+    public void deleteAdminMember(Long memberId)
+    {
+        Integer references = jdbcTemplate.queryForObject(
+                "select (select count(1) from xy_membership_card where member_id=?)"
+                        + "+(select count(1) from xy_membership_order where member_id=?)"
+                        + "+(select count(1) from xy_member_visit where member_id=?)"
+                        + "+(select count(1) from xy_reservation where member_id=?)"
+                        + "+(select count(1) from xy_address where member_id=?)"
+                        + "+(select count(1) from xy_order where member_id=?)"
+                        + "+(select count(1) from xy_payment where member_id=?)",
+                Integer.class, memberId, memberId, memberId, memberId, memberId, memberId, memberId);
+        if (references != null && references > 0)
+            throw new ServiceException("该会员已有会员卡、预约或财务记录，不能删除；可以编辑为停用状态");
+        int deleted = jdbcTemplate.update("delete from xy_member where member_id=?", memberId);
+        if (deleted != 1) throw new ServiceException("会员不存在或已删除");
     }
 
     public List<Map<String, Object>> adminReservations(LocalDate date, String status)
@@ -1048,6 +1109,31 @@ public class XyBusinessService
     public List<Map<String, Object>> financeRecords()
     {
         return jdbcTemplate.queryForList("select p.payment_no as paymentNo, p.business_type as businessType, p.amount, p.channel, p.status, p.transaction_id as transactionId, p.paid_time as paidTime, p.create_time as createTime, m.nickname, m.mobile from xy_payment p join xy_member m on m.member_id=p.member_id order by p.create_time desc");
+    }
+
+    public List<XyFinanceExportRow> financeExportRows()
+    {
+        return jdbcTemplate.query(
+                "select p.payment_no,"
+                        + "case p.business_type when 'MEMBERSHIP' then '会员开通' when 'ORDER' then '历史商品记录' else p.business_type end as business_type,"
+                        + "p.amount,case p.channel when 'WECHAT' then '微信支付' when 'OFFLINE' then '线下收款' when 'DEMO' then '演示记录' else p.channel end as channel,"
+                        + "case p.status when 'PENDING' then '待收款' when 'SUCCESS' then '已成功' when 'CLOSED' then '已关闭' when 'REFUNDING' then '退款处理中' when 'REFUNDED' then '已退款' else p.status end as status,"
+                        + "p.transaction_id,m.nickname,m.mobile,date_format(p.paid_time,'%Y-%m-%d %H:%i:%s') as paid_time,date_format(p.create_time,'%Y-%m-%d %H:%i:%s') as create_time "
+                        + "from xy_payment p join xy_member m on m.member_id=p.member_id order by p.create_time desc",
+                (rs, rowNum) -> {
+                    XyFinanceExportRow row = new XyFinanceExportRow();
+                    row.setPaymentNo(rs.getString("payment_no"));
+                    row.setBusinessType(rs.getString("business_type"));
+                    row.setAmount(rs.getBigDecimal("amount"));
+                    row.setChannel(rs.getString("channel"));
+                    row.setStatus(rs.getString("status"));
+                    row.setTransactionId(rs.getString("transaction_id"));
+                    row.setNickname(rs.getString("nickname"));
+                    row.setMobile(rs.getString("mobile"));
+                    row.setPaidTime(rs.getString("paid_time"));
+                    row.setCreateTime(rs.getString("create_time"));
+                    return row;
+                });
     }
 
     public List<Map<String,Object>> adminOrders()
@@ -1241,6 +1327,8 @@ public class XyBusinessService
             throw new ServiceException("门店经度必须在 -180 到 180 之间");
         if (latitude != null && (latitude.compareTo(new BigDecimal("-90")) < 0 || latitude.compareTo(new BigDecimal("90")) > 0))
             throw new ServiceException("门店纬度必须在 -90 到 90 之间");
+        if (longitude != null && longitude.compareTo(BigDecimal.ZERO) == 0 && latitude.compareTo(BigDecimal.ZERO) == 0)
+            throw new ServiceException("门店经纬度不能同时为 0");
         if (longitude != null && (decimalScale(longitude) > 7 || decimalScale(latitude) > 7))
             throw new ServiceException("门店经纬度最多保留7位小数");
         Long storeId = number(input.get("storeId"));
@@ -1364,6 +1452,15 @@ public class XyBusinessService
             throw new ServiceException("不能预约过去的日期");
         if (reservationDate.isAfter(today.plusDays(RESERVATION_WINDOW_DAYS - 1L)))
             throw new ServiceException("仅可预约未来30天内的场次");
+    }
+
+    private LocalDate toLocalDate(Object value)
+    {
+        if (value instanceof LocalDate) return (LocalDate) value;
+        if (value instanceof java.sql.Date) return ((java.sql.Date) value).toLocalDate();
+        if (value == null) return null;
+        try { return LocalDate.parse(String.valueOf(value).substring(0, 10)); }
+        catch (RuntimeException ex) { return null; }
     }
 
     private String nextNo(String prefix)

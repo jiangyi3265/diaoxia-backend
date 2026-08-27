@@ -112,10 +112,25 @@ CREATE TABLE IF NOT EXISTS xy_member_visit (
   verified_by VARCHAR(64) DEFAULT NULL,
   checkin_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (visit_id),
-  UNIQUE KEY uk_xy_member_visit_code (verify_code),
+  KEY idx_xy_member_visit_code (verify_code),
   KEY idx_xy_member_visit_member (member_id, checkin_time),
   CONSTRAINT fk_xy_member_visit_member FOREIGN KEY (member_id) REFERENCES xy_member(member_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='会员到店核销记录';
+
+-- 4位动态会员码每10秒轮换，历史码允许重复，不能再使用全表唯一索引。
+SET @xy_member_visit_unique = (SELECT IF(COUNT(*)>0,
+  'ALTER TABLE xy_member_visit DROP INDEX uk_xy_member_visit_code',
+  'SELECT 1') FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='xy_member_visit' AND index_name='uk_xy_member_visit_code');
+PREPARE xy_member_visit_unique_stmt FROM @xy_member_visit_unique;
+EXECUTE xy_member_visit_unique_stmt;
+DEALLOCATE PREPARE xy_member_visit_unique_stmt;
+
+SET @xy_member_visit_index = (SELECT IF(COUNT(*)=0,
+  'ALTER TABLE xy_member_visit ADD KEY idx_xy_member_visit_code (verify_code)',
+  'SELECT 1') FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='xy_member_visit' AND index_name='idx_xy_member_visit_code');
+PREPARE xy_member_visit_index_stmt FROM @xy_member_visit_index;
+EXECUTE xy_member_visit_index_stmt;
+DEALLOCATE PREPARE xy_member_visit_index_stmt;
 
 CREATE TABLE IF NOT EXISTS xy_reservation_slot (
   slot_id BIGINT NOT NULL AUTO_INCREMENT COMMENT '时段ID',
@@ -374,10 +389,11 @@ FROM (
   UNION ALL SELECT 10012, '预约核销', 10006, 'xy:reservation:verify'
   UNION ALL SELECT 10013, '会员套餐维护', 10002, 'xy:member:plan'
   UNION ALL SELECT 10014, '线下收退款', 10007, 'xy:finance:collect'
+  UNION ALL SELECT 10015, '会员资料维护', 10002, 'xy:member:edit'
 ) AS permissions
 WHERE NOT EXISTS (SELECT 1 FROM sys_menu existing_menu WHERE existing_menu.menu_id = permissions.menu_id);
 
 INSERT INTO sys_role_menu (role_id, menu_id)
 SELECT 1, menu.menu_id FROM sys_menu menu
-WHERE menu.menu_id BETWEEN 10000 AND 10014
+WHERE menu.menu_id BETWEEN 10000 AND 10015
   AND NOT EXISTS (SELECT 1 FROM sys_role_menu role_menu WHERE role_menu.role_id = 1 AND role_menu.menu_id = menu.menu_id);

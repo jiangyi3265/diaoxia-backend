@@ -3,10 +3,12 @@ package com.ruoyi.web.service.xy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.AfterEach;
@@ -15,10 +17,13 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.mock.web.MockHttpServletResponse;
 import org.springframework.transaction.annotation.Transactional;
 import com.ruoyi.RuoYiApplication;
 import com.ruoyi.common.core.redis.RedisCache;
 import com.ruoyi.common.exception.ServiceException;
+import com.ruoyi.common.utils.poi.ExcelUtil;
+import com.ruoyi.web.domain.xy.XyFinanceExportRow;
 
 /**
  * 商城、预约、会员和核销的真实数据库/Redis集成测试。
@@ -129,6 +134,13 @@ class XyBusinessFlowIntegrationTest
                 .movePointRight(2)
                 .intValueExact();
         service.completeOrderPayment(paymentNo, "wx_test_" + suffix, payableCents);
+        List<XyFinanceExportRow> financeRows = service.financeExportRows();
+        assertTrue(financeRows.stream().anyMatch(row -> paymentNo.equals(row.getPaymentNo())
+                && new BigDecimal(String.valueOf(paidOrder.get("payableAmount"))).compareTo(row.getAmount()) == 0));
+        MockHttpServletResponse financeResponse = new MockHttpServletResponse();
+        new ExcelUtil<XyFinanceExportRow>(XyFinanceExportRow.class)
+                .exportExcel(financeResponse, financeRows, "财务对账");
+        assertTrue(financeResponse.getContentAsByteArray().length > 0);
         service.shipOrder(String.valueOf(paidOrder.get("orderNo")));
         service.confirmReceipt(memberId, String.valueOf(paidOrder.get("orderNo")));
         String afterSaleNo = service.createAfterSale(memberId, String.valueOf(paidOrder.get("orderNo")), "商品问题", "集成测试售后");
@@ -144,12 +156,36 @@ class XyBusinessFlowIntegrationTest
         assertEquals("REFUNDED", jdbc.queryForObject("select status from xy_payment where business_type='ORDER' and business_id=?", String.class, refundedOrder.get("orderId")));
         assertEquals(9, jdbc.queryForObject("select stock from xy_product where product_id=?", Integer.class, productId));
 
+        jdbc.update("update xy_membership_card set expire_date=curdate() where member_id=?", memberId);
+        assertThrows(ServiceException.class, () -> service.createReservation(memberId, storeId, slotId, seatId, tomorrow));
+
+        jdbc.update("update xy_reservation_slot set start_time='00:00:00',end_time='23:59:59' where slot_id=?", slotId);
+        String todayReservationNo = "TR" + suffix.substring(0, 28);
+        jdbc.update("insert into xy_reservation(reservation_no,member_id,store_id,slot_id,seat_id,reservation_date,verify_code) values(?,?,?,?,?,?,?)",
+                todayReservationNo, memberId, storeId, slotId, seatId, LocalDate.now(), "98" + suffix.substring(0, 6));
+
         Map<String, Object> previousCode = service.issueMemberVerifyCode(memberId);
         assertEquals(10, ((Number) previousCode.get("expiresIn")).intValue());
         Map<String, Object> code = service.issueMemberVerifyCode(memberId);
         String verifyCode = String.valueOf(code.get("code"));
+        assertEquals(4, verifyCode.length());
         assertThrows(ServiceException.class, () -> service.verifyMemberCode(String.valueOf(previousCode.get("code")), "integration-test"));
-        assertEquals(memberId, ((Number) service.verifyMemberCode(verifyCode, "integration-test").get("memberId")).longValue());
+        Map<String, Object> verifiedMember = service.verifyMemberCode(verifyCode, "integration-test");
+        assertEquals(memberId, ((Number) verifiedMember.get("memberId")).longValue());
+        assertEquals(true, verifiedMember.get("reservationCheckedIn"));
+        assertEquals("CHECKED_IN", jdbc.queryForObject("select status from xy_reservation where reservation_no=?", String.class, todayReservationNo));
         assertThrows(ServiceException.class, () -> service.verifyMemberCode(verifyCode, "integration-test"));
+
+        Map<String, Object> manualMember = new HashMap<>();
+        manualMember.put("nickname", "后台新建会员" + suffix.substring(0, 6));
+        manualMember.put("mobile", "13900000000");
+        manualMember.put("memberStatus", "0");
+        Long manualMemberId = service.saveAdminMember(null, manualMember);
+        manualMember.put("nickname", "后台修改会员" + suffix.substring(0, 6));
+        service.saveAdminMember(manualMemberId, manualMember);
+        assertEquals(String.valueOf(manualMember.get("nickname")), jdbc.queryForObject("select nickname from xy_member where member_id=?", String.class, manualMemberId));
+        service.deleteAdminMember(manualMemberId);
+        assertEquals(0, jdbc.queryForObject("select count(1) from xy_member where member_id=?", Integer.class, manualMemberId));
+        assertThrows(ServiceException.class, () -> service.deleteAdminMember(memberId));
     }
 }
