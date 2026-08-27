@@ -115,6 +115,17 @@ public class XyAppController
     }
 
     @Anonymous
+    @PostMapping("/me/wechat-mobile")
+    public AjaxResult bindWechatMobile(@RequestHeader(value = "X-App-Token", required = false) String token,
+            @RequestBody Map<String, Object> body)
+    {
+        Long memberId = service.requireMember(token);
+        Object code = body.get("code");
+        String mobile = wechatService.exchangePhoneCode(code == null ? null : String.valueOf(code).trim());
+        return AjaxResult.success(service.bindVerifiedMobile(memberId, mobile));
+    }
+
+    @Anonymous
     @PostMapping("/reservations")
     public AjaxResult book(@RequestHeader(value = "X-App-Token", required = false) String token, @RequestBody Map<String, Object> body)
     {

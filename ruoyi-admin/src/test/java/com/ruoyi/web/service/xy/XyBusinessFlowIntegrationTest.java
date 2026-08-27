@@ -188,4 +188,43 @@ class XyBusinessFlowIntegrationTest
         assertEquals(0, jdbc.queryForObject("select count(1) from xy_member where member_id=?", Integer.class, manualMemberId));
         assertThrows(ServiceException.class, () -> service.deleteAdminMember(memberId));
     }
+
+    @Test
+    void verifiedWechatMobileLinksPrecreatedMembershipWithoutDuplicateAccount()
+    {
+        String suffix = UUID.randomUUID().toString().replace("-", "");
+        String mobile = "137" + String.format("%08d", Integer.toUnsignedLong(suffix.hashCode()) % 100000000L);
+        jdbc.update("insert into xy_membership_plan(plan_name,amount,duration_days,daily_reservation_limit) values(?,?,?,?)",
+                "手机号关联测试套餐" + suffix.substring(0, 6), new BigDecimal("88.00"), 30, 1);
+        Long planId = jdbc.queryForObject("select last_insert_id()", Long.class);
+
+        Map<String, Object> manual = new HashMap<>();
+        manual.put("nickname", "门店预建会员" + suffix.substring(0, 5));
+        manual.put("mobile", mobile);
+        manual.put("memberStatus", "0");
+        manual.put("grantMembership", true);
+        manual.put("planId", planId);
+        manual.put("membershipStartDate", LocalDate.now().toString());
+        Long manualMemberId = service.saveAdminMember(null, manual);
+        assertNotNull(service.currentCard(manualMemberId));
+
+        Map<String, Object> login = service.loginByOpenId("phone_link_" + suffix, null);
+        memberToken = String.valueOf(login.get("memberToken"));
+        Long wechatMemberId = service.requireMember(memberToken);
+        Map<String, Object> linked = service.bindVerifiedMobile(wechatMemberId, mobile);
+
+        assertEquals(wechatMemberId, ((Number) linked.get("memberId")).longValue());
+        assertEquals(1, jdbc.queryForObject("select count(1) from xy_member where member_id=? and mobile_verified_at is not null", Integer.class, wechatMemberId));
+        assertNotNull(linked.get("card"));
+        assertEquals(0, jdbc.queryForObject("select count(1) from xy_member where member_id=?", Integer.class, manualMemberId));
+        assertEquals(1, jdbc.queryForObject("select count(1) from xy_member where mobile=?", Integer.class, mobile));
+        assertEquals(wechatMemberId, jdbc.queryForObject(
+                "select member_id from xy_membership_card where member_id=? order by card_id desc limit 1",
+                Long.class, wechatMemberId));
+
+        manual.put("grantMembership", false);
+        Long reusedMemberId = service.saveAdminMember(null, manual);
+        assertEquals(wechatMemberId, reusedMemberId);
+        assertEquals(1, jdbc.queryForObject("select count(1) from xy_member where mobile=?", Integer.class, mobile));
+    }
 }

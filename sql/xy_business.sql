@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS xy_member (
   nickname VARCHAR(100) DEFAULT NULL COMMENT '昵称',
   avatar_url VARCHAR(500) DEFAULT NULL COMMENT '头像地址',
   mobile VARCHAR(32) DEFAULT NULL COMMENT '手机号',
+  mobile_verified_at DATETIME DEFAULT NULL COMMENT '微信手机号验证时间',
   invite_code VARCHAR(12) NOT NULL COMMENT '邀请码',
   inviter_member_id BIGINT DEFAULT NULL COMMENT '邀请人会员ID（首次绑定后不可改）',
   status CHAR(1) NOT NULL DEFAULT '0' COMMENT '状态：0正常，1停用',
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS xy_member (
   PRIMARY KEY (member_id),
   UNIQUE KEY uk_xy_member_openid (openid),
   UNIQUE KEY uk_xy_member_invite_code (invite_code),
+  KEY idx_xy_member_mobile (mobile),
   KEY idx_xy_member_inviter (inviter_member_id),
   CONSTRAINT fk_xy_member_inviter FOREIGN KEY (inviter_member_id) REFERENCES xy_member(member_id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='钓虾会员';
@@ -55,6 +57,21 @@ SET @xy_inviter_fk = (SELECT IF(COUNT(*)=0,
 PREPARE xy_inviter_fk_stmt FROM @xy_inviter_fk;
 EXECUTE xy_inviter_fk_stmt;
 DEALLOCATE PREPARE xy_inviter_fk_stmt;
+
+-- 兼容已建库：手机号只有经过微信授权验证后才能自动关联后台预建会员。
+SET @xy_mobile_verified_column = (SELECT IF(COUNT(*)=0,
+  'ALTER TABLE xy_member ADD COLUMN mobile_verified_at DATETIME DEFAULT NULL COMMENT ''微信手机号验证时间'' AFTER mobile',
+  'SELECT 1') FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name='xy_member' AND column_name='mobile_verified_at');
+PREPARE xy_mobile_verified_column_stmt FROM @xy_mobile_verified_column;
+EXECUTE xy_mobile_verified_column_stmt;
+DEALLOCATE PREPARE xy_mobile_verified_column_stmt;
+
+SET @xy_member_mobile_index = (SELECT IF(COUNT(*)=0,
+  'ALTER TABLE xy_member ADD KEY idx_xy_member_mobile (mobile)',
+  'SELECT 1') FROM information_schema.statistics WHERE table_schema=DATABASE() AND table_name='xy_member' AND index_name='idx_xy_member_mobile');
+PREPARE xy_member_mobile_index_stmt FROM @xy_member_mobile_index;
+EXECUTE xy_member_mobile_index_stmt;
+DEALLOCATE PREPARE xy_member_mobile_index_stmt;
 
 CREATE TABLE IF NOT EXISTS xy_membership_plan (
   plan_id BIGINT NOT NULL AUTO_INCREMENT COMMENT '套餐ID',

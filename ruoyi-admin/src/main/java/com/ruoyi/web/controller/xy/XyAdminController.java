@@ -38,6 +38,9 @@ public class XyAdminController
     @PreAuthorize("@ss.hasPermi('xy:member:list')")
     @GetMapping("/members") public AjaxResult members(@RequestParam(required = false) String keyword) { return AjaxResult.success(service.adminMembers(keyword)); }
 
+    @PreAuthorize("@ss.hasPermi('xy:member:list')")
+    @GetMapping("/members/plans") public AjaxResult membershipPlans() { return AjaxResult.success(service.adminMembershipPlans()); }
+
     @Log(title = "会员管理", businessType = BusinessType.INSERT)
     @PreAuthorize("@ss.hasPermi('xy:member:edit')")
     @PostMapping("/members") public AjaxResult createMember(@RequestBody Map<String, Object> body) { return AjaxResult.success(service.saveAdminMember(null, body)); }

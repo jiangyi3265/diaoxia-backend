@@ -25,6 +25,7 @@ public class XyWechatService
     private static final Logger log = LoggerFactory.getLogger(XyWechatService.class);
     private static final String SESSION_URL = "https://api.weixin.qq.com/sns/jscode2session?appid={appid}&secret={secret}&js_code={code}&grant_type=authorization_code";
     private static final String ACCESS_TOKEN_URL = "https://api.weixin.qq.com/cgi-bin/token?grant_type=client_credential&appid={appid}&secret={secret}";
+    private static final String PHONE_NUMBER_URL = "https://api.weixin.qq.com/wxa/business/getuserphonenumber?access_token={token}";
     private static final String SUBSCRIBE_SEND_URL = "https://api.weixin.qq.com/cgi-bin/message/subscribe/send?access_token={token}";
     private static final DateTimeFormatter REMINDER_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
     private final XyWechatProperties properties;
@@ -70,6 +71,44 @@ public class XyWechatService
             // RestTemplate 异常可能包含带 AppSecret 的完整请求地址，日志中不得输出异常明细。
             log.warn("微信 code2session 调用失败，异常类型={}", ex.getClass().getSimpleName());
             throw new ServiceException("微信登录服务暂不可用，请稍后重试");
+        }
+    }
+
+    /** 使用一次性手机号授权 code 换取微信已验证手机号，不能接受客户端直接上传手机号。 */
+    @SuppressWarnings("unchecked")
+    public String exchangePhoneCode(String code)
+    {
+        if (StringUtils.isEmpty(code)) throw new ServiceException("请重新授权微信手机号");
+        try
+        {
+            Map<String, String> payload = new LinkedHashMap<>();
+            payload.put("code", code.trim());
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            HttpEntity<String> request = new HttpEntity<>(objectMapper.writeValueAsString(payload), headers);
+            ResponseEntity<String> response = restTemplate.postForEntity(
+                    PHONE_NUMBER_URL, request, String.class, accessToken());
+            Map<String, Object> body = objectMapper.readValue(response.getBody(), Map.class);
+            Number errorCode = body.get("errcode") instanceof Number ? (Number) body.get("errcode") : null;
+            Map<String, Object> phoneInfo = body.get("phone_info") instanceof Map
+                    ? (Map<String, Object>) body.get("phone_info") : null;
+            String mobile = phoneInfo == null ? null : String.valueOf(
+                    phoneInfo.get("purePhoneNumber") == null ? phoneInfo.get("phoneNumber") : phoneInfo.get("purePhoneNumber"));
+            if (errorCode == null || errorCode.intValue() != 0 || StringUtils.isEmpty(mobile)
+                    || !mobile.matches("^1\\d{10}$"))
+            {
+                throw new ServiceException("微信手机号授权失败，请重新操作");
+            }
+            return mobile;
+        }
+        catch (ServiceException ex)
+        {
+            throw ex;
+        }
+        catch (Exception ex)
+        {
+            log.warn("微信手机号授权调用失败，异常类型={}", ex.getClass().getSimpleName());
+            throw new ServiceException("微信手机号服务暂不可用，请稍后重试");
         }
     }
 

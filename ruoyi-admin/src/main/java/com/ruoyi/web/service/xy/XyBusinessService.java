@@ -214,7 +214,7 @@ public class XyBusinessService
 
     public Map<String, Object> memberProfile(Long memberId)
     {
-        List<Map<String, Object>> list = jdbcTemplate.queryForList("select member_id as memberId, nickname, avatar_url as avatarUrl, mobile, invite_code as inviteCode, create_time as createTime from xy_member where member_id = ?", memberId);
+        List<Map<String, Object>> list = jdbcTemplate.queryForList("select member_id as memberId, nickname, avatar_url as avatarUrl, mobile, mobile_verified_at is not null as mobileVerified, invite_code as inviteCode, create_time as createTime from xy_member where member_id = ?", memberId);
         if (list.isEmpty())
         {
             throw new ServiceException("会员不存在");
@@ -229,9 +229,57 @@ public class XyBusinessService
     {
         String nickname = required(input, "nickname", "昵称不能为空");
         checkLength(nickname, 100, "昵称不能超过100个字符");
-        String mobile = input.get("mobile") == null ? null : String.valueOf(input.get("mobile")).trim();
-        if (mobile != null && !mobile.isEmpty() && !mobile.matches("^1\\d{10}$")) throw new ServiceException("手机号格式不正确");
-        jdbcTemplate.update("update xy_member set nickname=?, mobile=?, avatar_url=? where member_id=?", nickname, mobile, input.get("avatarUrl"), memberId);
+        jdbcTemplate.update("update xy_member set nickname=?, avatar_url=? where member_id=?", nickname, input.get("avatarUrl"), memberId);
+    }
+
+    /**
+     * 绑定微信已验证手机号，并把相同手机号的后台预建档案合并到当前微信账号。
+     * 手工输入的手机号不能调用此方法，避免冒领其他人的会员权益。
+     */
+    @Transactional
+    public Map<String, Object> bindVerifiedMobile(Long memberId, String mobile)
+    {
+        if (mobile == null || !mobile.matches("^1\\d{10}$")) throw new ServiceException("微信返回的手机号格式不正确");
+        List<Map<String, Object>> currentRows = jdbcTemplate.queryForList(
+                "select member_id,nickname,status,inviter_member_id from xy_member where member_id=? for update", memberId);
+        if (currentRows.isEmpty()) throw new ServiceException("会员不存在");
+        if (!"0".equals(String.valueOf(currentRows.get(0).get("status")))) throw new ServiceException("会员账号不可用", 403);
+
+        List<Map<String, Object>> matches = jdbcTemplate.queryForList(
+                "select member_id,openid,nickname,status,mobile_verified_at from xy_member where mobile=? and member_id<>? order by member_id for update",
+                mobile, memberId);
+        for (Map<String, Object> match : matches)
+        {
+            String openid = String.valueOf(match.get("openid"));
+            if (!openid.startsWith("manual_"))
+                throw new ServiceException("该手机号已关联其他微信账号，请联系门店核对");
+            if (!"0".equals(String.valueOf(match.get("status"))))
+                throw new ServiceException("该手机号对应的门店会员档案已停用，请联系门店处理");
+            mergeManualMemberInto(memberId, ((Number) match.get("member_id")).longValue());
+            String currentNickname = String.valueOf(currentRows.get(0).get("nickname"));
+            Object manualNickname = match.get("nickname");
+            if ((StringUtils.isEmpty(currentNickname) || "微信用户".equals(currentNickname)) && manualNickname != null)
+                jdbcTemplate.update("update xy_member set nickname=? where member_id=?", manualNickname, memberId);
+        }
+        jdbcTemplate.update("update xy_member set mobile=?,mobile_verified_at=now() where member_id=?", mobile, memberId);
+        return memberProfile(memberId);
+    }
+
+    private void mergeManualMemberInto(Long survivorMemberId, Long manualMemberId)
+    {
+        if (survivorMemberId.equals(manualMemberId)) return;
+        jdbcTemplate.update("update xy_member set inviter_member_id=null where member_id=? and inviter_member_id=?", survivorMemberId, manualMemberId);
+        jdbcTemplate.update("update xy_member set inviter_member_id=? where inviter_member_id=? and member_id<>?", survivorMemberId, manualMemberId, survivorMemberId);
+        jdbcTemplate.update("update xy_membership_card set member_id=? where member_id=?", survivorMemberId, manualMemberId);
+        jdbcTemplate.update("update xy_membership_order set member_id=? where member_id=?", survivorMemberId, manualMemberId);
+        jdbcTemplate.update("update xy_member_visit set member_id=? where member_id=?", survivorMemberId, manualMemberId);
+        jdbcTemplate.update("update xy_reservation set member_id=? where member_id=?", survivorMemberId, manualMemberId);
+        jdbcTemplate.update("update xy_address set member_id=? where member_id=?", survivorMemberId, manualMemberId);
+        jdbcTemplate.update("update xy_order set member_id=? where member_id=?", survivorMemberId, manualMemberId);
+        jdbcTemplate.update("update xy_after_sale set member_id=? where member_id=?", survivorMemberId, manualMemberId);
+        jdbcTemplate.update("update xy_payment set member_id=? where member_id=?", survivorMemberId, manualMemberId);
+        int deleted = jdbcTemplate.update("delete from xy_member where member_id=? and left(openid,7)='manual_'", manualMemberId);
+        if (deleted != 1) throw new ServiceException("门店预建会员档案合并失败，请联系管理员");
     }
 
     public Map<String, Object> currentCard(Long memberId)
@@ -317,6 +365,11 @@ public class XyBusinessService
     public List<Map<String, Object>> listMembershipPlans()
     {
         return jdbcTemplate.queryForList("select plan_id as planId, plan_name as planName, amount, duration_days as durationDays, daily_reservation_limit as dailyReservationLimit from xy_membership_plan where status='0' and duration_days=30 order by sort_order, plan_id limit 1");
+    }
+
+    public List<Map<String, Object>> adminMembershipPlans()
+    {
+        return jdbcTemplate.queryForList("select plan_id as planId,plan_name as planName,amount,duration_days as durationDays,status from xy_membership_plan order by status,sort_order,plan_id");
     }
 
     public Map<String, Object> reservationAvailability(Long storeId, LocalDate reservationDate)
@@ -1016,19 +1069,91 @@ public class XyBusinessService
         String mobile = optionalText(input, "mobile", 32, "手机号不能超过32个字符");
         if (mobile != null && !mobile.matches("^1\\d{10}$")) throw new ServiceException("手机号格式不正确");
         String status = "1".equals(String.valueOf(input.get("memberStatus"))) ? "1" : "0";
-        if (memberId == null)
+        Long effectiveMemberId = memberId;
+        if (effectiveMemberId == null && mobile != null)
+        {
+            List<Map<String, Object>> sameMobile = jdbcTemplate.queryForList(
+                    "select member_id,openid from xy_member where mobile=? order by case when left(openid,7)='manual_' then 1 else 0 end,member_id for update",
+                    mobile);
+            Long survivor = null;
+            int wechatAccounts = 0;
+            for (Map<String, Object> row : sameMobile)
+            {
+                String existingOpenid = String.valueOf(row.get("openid"));
+                if (!existingOpenid.startsWith("manual_"))
+                {
+                    survivor = ((Number) row.get("member_id")).longValue();
+                    wechatAccounts++;
+                }
+            }
+            if (wechatAccounts > 1) throw new ServiceException("该手机号对应多个微信账号，请让用户先完成微信手机号验证");
+            if (survivor == null && !sameMobile.isEmpty())
+                survivor = ((Number) sameMobile.get(0).get("member_id")).longValue();
+            if (survivor != null)
+            {
+                for (Map<String, Object> row : sameMobile)
+                {
+                    Long duplicateId = ((Number) row.get("member_id")).longValue();
+                    if (!duplicateId.equals(survivor) && String.valueOf(row.get("openid")).startsWith("manual_"))
+                        mergeManualMemberInto(survivor, duplicateId);
+                }
+                effectiveMemberId = survivor;
+            }
+        }
+        if (effectiveMemberId == null)
         {
             String openid = "manual_" + UUID.randomUUID().toString().replace("-", "");
             jdbcTemplate.update(
                     "insert into xy_member(openid,nickname,mobile,invite_code,status) values(?,?,?,?,?)",
                     openid, nickname, mobile, generateInviteCode(), status);
-            return jdbcTemplate.queryForObject("select last_insert_id()", Long.class);
+            effectiveMemberId = jdbcTemplate.queryForObject("select last_insert_id()", Long.class);
         }
-        int updated = jdbcTemplate.update(
-                "update xy_member set nickname=?,mobile=?,status=? where member_id=?",
-                nickname, mobile, status, memberId);
-        if (updated != 1) throw new ServiceException("会员不存在");
-        return memberId;
+        else
+        {
+            Integer duplicateMobile = mobile == null ? 0 : jdbcTemplate.queryForObject(
+                    "select count(1) from xy_member where mobile=? and member_id<>?", Integer.class, mobile, effectiveMemberId);
+            if (duplicateMobile != null && duplicateMobile > 0)
+                throw new ServiceException("该手机号已有会员档案，请让用户完成微信手机号授权自动合并，或编辑已有记录");
+            int updated = jdbcTemplate.update(
+                    "update xy_member set nickname=?,mobile_verified_at=case when mobile<=>? then mobile_verified_at else null end,mobile=?,status=? where member_id=?",
+                    nickname, mobile, mobile, status, effectiveMemberId);
+            if (updated != 1) throw new ServiceException("会员不存在");
+        }
+        if (Boolean.TRUE.equals(input.get("grantMembership")) || "true".equalsIgnoreCase(String.valueOf(input.get("grantMembership"))))
+            grantAdminMembership(effectiveMemberId, input);
+        return effectiveMemberId;
+    }
+
+    private void grantAdminMembership(Long memberId, Map<String, Object> input)
+    {
+        Integer pendingPayments = jdbcTemplate.queryForObject(
+                "select count(1) from xy_membership_order o join xy_payment p on p.business_type='MEMBERSHIP' and p.business_id=o.membership_order_id where o.member_id=? and o.status='PENDING_PAYMENT' and p.status='PENDING'",
+                Integer.class, memberId);
+        if (pendingPayments != null && pendingPayments > 0)
+            throw new ServiceException("该会员有待完成的开卡支付，不能后台重复开卡；请等待支付完成或待付款单超时关闭");
+        Long planId = number(input.get("planId"));
+        if (planId == null)
+        {
+            List<Long> planIds = jdbcTemplate.query(
+                    "select plan_id from xy_membership_plan where status='0' order by sort_order,plan_id limit 1",
+                    (rs, rowNum) -> rs.getLong(1));
+            if (planIds.isEmpty()) throw new ServiceException("没有可用的会员方案");
+            planId = planIds.get(0);
+        }
+        List<Map<String, Object>> plans = jdbcTemplate.queryForList(
+                "select plan_id,duration_days from xy_membership_plan where plan_id=? and status='0' for update", planId);
+        if (plans.isEmpty()) throw new ServiceException("选择的会员方案不存在或已下架");
+        Object requestedStart = input.get("membershipStartDate");
+        LocalDate start = requestedStart == null || StringUtils.isEmpty(String.valueOf(requestedStart).trim())
+                ? LocalDate.now() : toLocalDate(requestedStart);
+        if (start == null) throw new ServiceException("会员生效日期格式不正确");
+        java.sql.Date max = jdbcTemplate.queryForObject(
+                "select max(expire_date) from xy_membership_card where member_id=? and status='ACTIVE'", java.sql.Date.class, memberId);
+        if (max != null && !max.toLocalDate().isBefore(start)) start = max.toLocalDate().plusDays(1);
+        int days = ((Number) plans.get(0).get("duration_days")).intValue();
+        jdbcTemplate.update(
+                "insert into xy_membership_card(member_id,plan_id,card_no,start_date,expire_date) values(?,?,?,?,?)",
+                memberId, planId, nextNo("MC"), start, start.plusDays(days - 1L));
     }
 
     @Transactional
