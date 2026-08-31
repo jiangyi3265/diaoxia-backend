@@ -112,6 +112,12 @@ xy:
     subscribe-reservation-page: ${XY_WECHAT_SUBSCRIBE_RESERVATION_PAGE:pages/reserve/history}
     subscribe-reservation-title-field: ${XY_WECHAT_SUBSCRIBE_RESERVATION_TITLE_FIELD:thing1}
     subscribe-reservation-time-field: ${XY_WECHAT_SUBSCRIBE_RESERVATION_TIME_FIELD:time2}
+    subscribe-benefit-start-template-id: ${XY_WECHAT_SUBSCRIBE_BENEFIT_START_TEMPLATE_ID:}
+    subscribe-benefit-cancel-template-id: ${XY_WECHAT_SUBSCRIBE_BENEFIT_CANCEL_TEMPLATE_ID:}
+    subscribe-benefit-page: ${XY_WECHAT_SUBSCRIBE_BENEFIT_PAGE:pages/benefit/history}
+    subscribe-benefit-title-field: ${XY_WECHAT_SUBSCRIBE_BENEFIT_TITLE_FIELD:thing1}
+    subscribe-benefit-time-field: ${XY_WECHAT_SUBSCRIBE_BENEFIT_TIME_FIELD:time2}
+    subscribe-benefit-note-field: ${XY_WECHAT_SUBSCRIBE_BENEFIT_NOTE_FIELD:thing3}
   wechat-pay:
     demo-enabled: ${XY_WECHAT_PAY_DEMO_ENABLED:false}
     mch-id: ${XY_WECHAT_PAY_MCH_ID:}

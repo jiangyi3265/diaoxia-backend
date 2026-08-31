@@ -1337,7 +1337,7 @@ public class XyBusinessService
     {
         return jdbcTemplate.query(
                 "select p.payment_no,"
-                        + "case p.business_type when 'MEMBERSHIP' then '会员开通' when 'ORDER' then '历史商品记录' else p.business_type end as business_type,"
+                        + "case p.business_type when 'MEMBERSHIP' then '会员开通' when 'ORDER' then '历史商品记录' when 'BENEFIT_EVENT' then '福利钓专场' else p.business_type end as business_type,"
                         + "p.amount,case p.channel when 'WECHAT' then '微信支付' when 'OFFLINE' then '线下收款' when 'DEMO' then '演示记录' else p.channel end as channel,"
                         + "case p.status when 'PENDING' then '待收款' when 'SUCCESS' then '已成功' when 'CLOSED' then '已关闭' when 'REFUNDING' then '退款处理中' when 'REFUNDED' then '已退款' else p.status end as status,"
                         + "p.transaction_id,m.nickname,m.mobile,date_format(p.paid_time,'%Y-%m-%d %H:%i:%s') as paid_time,date_format(p.create_time,'%Y-%m-%d %H:%i:%s') as create_time "

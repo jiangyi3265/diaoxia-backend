@@ -21,6 +21,7 @@ import com.ruoyi.common.utils.poi.ExcelUtil;
 import com.ruoyi.web.domain.xy.XyFinanceExportRow;
 import com.ruoyi.web.service.xy.XyBusinessService;
 import com.ruoyi.web.service.xy.XyWechatPayService;
+import com.ruoyi.web.service.xy.XyBenefitEventService;
 import com.ruoyi.common.utils.SecurityUtils;
 
 /** 后台运营接口：完全使用若依管理员登录态和权限体系。 */
@@ -30,7 +31,14 @@ public class XyAdminController
 {
     private final XyBusinessService service;
     private final XyWechatPayService wechatPayService;
-    public XyAdminController(XyBusinessService service,XyWechatPayService wechatPayService) { this.service = service; this.wechatPayService=wechatPayService; }
+    private final XyBenefitEventService benefitEventService;
+    public XyAdminController(XyBusinessService service,XyWechatPayService wechatPayService,
+            XyBenefitEventService benefitEventService)
+    {
+        this.service = service;
+        this.wechatPayService=wechatPayService;
+        this.benefitEventService=benefitEventService;
+    }
 
     @PreAuthorize("@ss.hasPermi('xy:dashboard:view')")
     @GetMapping("/dashboard") public AjaxResult dashboard() { return AjaxResult.success(service.dashboard()); }
@@ -93,6 +101,52 @@ public class XyAdminController
 
     @PreAuthorize("@ss.hasPermi('xy:reservation:config')")
     @PutMapping("/seats") public AjaxResult updateSeat(@RequestBody Map<String, Object> body) { return AjaxResult.success(service.saveSeat(body)); }
+
+    @PreAuthorize("@ss.hasPermi('xy:benefit:list')")
+    @GetMapping("/benefit-events") public AjaxResult benefitEvents() { return AjaxResult.success(benefitEventService.adminEvents()); }
+
+    @PreAuthorize("@ss.hasPermi('xy:benefit:list')")
+    @GetMapping("/benefit-events/{eventId}") public AjaxResult benefitEvent(@PathVariable Long eventId) { return AjaxResult.success(benefitEventService.adminEvent(eventId)); }
+
+    @Log(title = "福利钓专场", businessType = BusinessType.INSERT)
+    @PreAuthorize("@ss.hasPermi('xy:benefit:edit')")
+    @PostMapping("/benefit-events") public AjaxResult createBenefitEvent(@RequestBody Map<String, Object> body)
+    {
+        return AjaxResult.success(benefitEventService.saveEvent(null, body, SecurityUtils.getUsername()));
+    }
+
+    @Log(title = "福利钓专场", businessType = BusinessType.UPDATE)
+    @PreAuthorize("@ss.hasPermi('xy:benefit:edit')")
+    @PutMapping("/benefit-events/{eventId}") public AjaxResult updateBenefitEvent(@PathVariable Long eventId,
+            @RequestBody Map<String, Object> body)
+    {
+        return AjaxResult.success(benefitEventService.saveEvent(eventId, body, SecurityUtils.getUsername()));
+    }
+
+    @Log(title = "确认福利钓开始", businessType = BusinessType.UPDATE)
+    @PreAuthorize("@ss.hasPermi('xy:benefit:edit')")
+    @PostMapping("/benefit-events/{eventId}/confirm") public AjaxResult confirmBenefitEvent(@PathVariable Long eventId)
+    {
+        return AjaxResult.success(benefitEventService.confirmEvent(eventId, SecurityUtils.getUsername()));
+    }
+
+    @Log(title = "取消福利钓专场", businessType = BusinessType.UPDATE)
+    @PreAuthorize("@ss.hasPermi('xy:benefit:refund')")
+    @PostMapping("/benefit-events/{eventId}/cancel") public AjaxResult cancelBenefitEvent(@PathVariable Long eventId,
+            @RequestBody Map<String, Object> body)
+    {
+        return AjaxResult.success(benefitEventService.cancelEvent(eventId,
+                body.get("reason") == null ? null : String.valueOf(body.get("reason")), SecurityUtils.getUsername()));
+    }
+
+    @Log(title = "福利钓单座资金处理", businessType = BusinessType.UPDATE)
+    @PreAuthorize("@ss.hasPermi('xy:benefit:refund')")
+    @PostMapping("/benefit-bookings/{bookingId}/refund") public AjaxResult refundBenefitBooking(@PathVariable Long bookingId,
+            @RequestBody Map<String, Object> body)
+    {
+        return AjaxResult.success(benefitEventService.refundBooking(bookingId,
+                body.get("reason") == null ? null : String.valueOf(body.get("reason")), SecurityUtils.getUsername()));
+    }
 
     @PreAuthorize("@ss.hasPermi('xy:member:plan')")
     @PostMapping("/membership-plans") public AjaxResult createPlan(@RequestBody Map<String, Object> body) { return AjaxResult.success(service.savePlan(body)); }

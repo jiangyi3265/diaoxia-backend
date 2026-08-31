@@ -352,7 +352,7 @@ CREATE TABLE IF NOT EXISTS xy_payment (
   payment_id BIGINT NOT NULL AUTO_INCREMENT COMMENT '支付ID',
   payment_no VARCHAR(40) NOT NULL COMMENT '支付单号',
   member_id BIGINT NOT NULL COMMENT '会员ID',
-  business_type VARCHAR(24) NOT NULL COMMENT '业务类型：MEMBERSHIP/ORDER',
+  business_type VARCHAR(24) NOT NULL COMMENT '业务类型：MEMBERSHIP/ORDER/BENEFIT_EVENT',
   business_id BIGINT NOT NULL COMMENT '业务主键',
   amount DECIMAL(10,2) NOT NULL COMMENT '支付金额',
   channel VARCHAR(24) NOT NULL COMMENT '支付渠道：WECHAT/OFFLINE/DEMO',
@@ -394,6 +394,96 @@ CREATE TABLE IF NOT EXISTS xy_reservation_notification_record (
   CONSTRAINT fk_xy_reservation_notification_reservation FOREIGN KEY (reservation_id) REFERENCES xy_reservation(reservation_id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='预约订阅消息发送记录';
 
+CREATE TABLE IF NOT EXISTS xy_benefit_event (
+  event_id BIGINT NOT NULL AUTO_INCREMENT COMMENT '福利钓场次ID',
+  event_no VARCHAR(40) NOT NULL COMMENT '场次编号',
+  store_id BIGINT NOT NULL COMMENT '门店ID',
+  event_date DATE NOT NULL COMMENT '场次日期',
+  start_time TIME NOT NULL DEFAULT '20:15:00' COMMENT '开始时间',
+  end_time TIME NOT NULL DEFAULT '22:15:00' COMMENT '结束时间',
+  signup_deadline TIME NOT NULL DEFAULT '19:30:00' COMMENT '报名截止时间',
+  fee_amount DECIMAL(10,2) NOT NULL DEFAULT 100.00 COMMENT '报名费',
+  announcement TEXT NOT NULL COMMENT '公告、奖品与开闭场条件',
+  announcement_version INT NOT NULL DEFAULT 1 COMMENT '公告版本',
+  status VARCHAR(16) NOT NULL DEFAULT 'DRAFT' COMMENT '状态：DRAFT/OPEN/CONFIRMED/CANCELED/FINISHED',
+  confirmed_time DATETIME DEFAULT NULL,
+  canceled_time DATETIME DEFAULT NULL,
+  cancel_reason VARCHAR(500) DEFAULT NULL,
+  create_by VARCHAR(64) DEFAULT NULL,
+  update_by VARCHAR(64) DEFAULT NULL,
+  create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (event_id),
+  UNIQUE KEY uk_xy_benefit_event_no (event_no),
+  UNIQUE KEY uk_xy_benefit_event_store_date (store_id, event_date),
+  KEY idx_xy_benefit_event_date_status (event_date, status),
+  CONSTRAINT fk_xy_benefit_event_store FOREIGN KEY (store_id) REFERENCES xy_store(store_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='福利钓专场';
+
+CREATE TABLE IF NOT EXISTS xy_benefit_booking (
+  booking_id BIGINT NOT NULL AUTO_INCREMENT,
+  booking_no VARCHAR(40) NOT NULL,
+  event_id BIGINT NOT NULL,
+  member_id BIGINT NOT NULL,
+  seat_no INT NOT NULL,
+  status VARCHAR(20) NOT NULL DEFAULT 'PENDING_PAYMENT',
+  seat_lock TINYINT DEFAULT 1,
+  member_lock TINYINT DEFAULT 1,
+  announcement_version INT NOT NULL,
+  announcement_snapshot TEXT NOT NULL,
+  announcement_confirmed_time DATETIME NOT NULL,
+  start_notice_accepted TINYINT NOT NULL DEFAULT 0,
+  cancel_notice_accepted TINYINT NOT NULL DEFAULT 0,
+  payment_payload TEXT DEFAULT NULL,
+  expires_time DATETIME DEFAULT NULL,
+  booked_time DATETIME DEFAULT NULL,
+  close_reason VARCHAR(500) DEFAULT NULL,
+  create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (booking_id),
+  UNIQUE KEY uk_xy_benefit_booking_no (booking_no),
+  UNIQUE KEY uk_xy_benefit_booking_seat_lock (event_id, seat_no, seat_lock),
+  UNIQUE KEY uk_xy_benefit_booking_member_lock (event_id, member_id, member_lock),
+  KEY idx_xy_benefit_booking_member (member_id, create_time),
+  KEY idx_xy_benefit_booking_event_status (event_id, status),
+  CONSTRAINT fk_xy_benefit_booking_event FOREIGN KEY (event_id) REFERENCES xy_benefit_event(event_id),
+  CONSTRAINT fk_xy_benefit_booking_member FOREIGN KEY (member_id) REFERENCES xy_member(member_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='福利钓报名';
+
+CREATE TABLE IF NOT EXISTS xy_benefit_refund (
+  benefit_refund_id BIGINT NOT NULL AUTO_INCREMENT,
+  booking_id BIGINT NOT NULL,
+  refund_no VARCHAR(64) NOT NULL,
+  refund_id VARCHAR(64) DEFAULT NULL,
+  amount DECIMAL(10,2) NOT NULL,
+  reason VARCHAR(500) NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'PROCESSING',
+  create_by VARCHAR(64) DEFAULT NULL,
+  complete_time DATETIME DEFAULT NULL,
+  create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (benefit_refund_id),
+  UNIQUE KEY uk_xy_benefit_refund_booking (booking_id),
+  UNIQUE KEY uk_xy_benefit_refund_no (refund_no),
+  KEY idx_xy_benefit_refund_status (status, create_time),
+  CONSTRAINT fk_xy_benefit_refund_booking FOREIGN KEY (booking_id) REFERENCES xy_benefit_booking(booking_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='福利钓后台资金处理';
+
+CREATE TABLE IF NOT EXISTS xy_benefit_notification_record (
+  notification_id BIGINT NOT NULL AUTO_INCREMENT,
+  booking_id BIGINT NOT NULL,
+  notice_type VARCHAR(16) NOT NULL,
+  status VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+  error_message VARCHAR(500) DEFAULT NULL,
+  sent_time DATETIME DEFAULT NULL,
+  create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (notification_id),
+  UNIQUE KEY uk_xy_benefit_notification (booking_id, notice_type),
+  KEY idx_xy_benefit_notification_status (status, create_time),
+  CONSTRAINT fk_xy_benefit_notification_booking FOREIGN KEY (booking_id) REFERENCES xy_benefit_booking(booking_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='福利钓订阅通知记录';
+
 -- 后台菜单：通过若依动态路由加载，禁止把运营页面放在前端匿名白名单中。
 INSERT INTO sys_menu (menu_id, menu_name, parent_id, order_num, path, component, `query`, route_name, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time, remark)
 SELECT 10000, '钓虾运营', 0, 20, 'xiayu', 'xiayu/layout', '', 'XyAdmin', 1, 0, 'M', '0', '0', '', 'dashboard', 'admin', NOW(), '钓虾运营后台'
@@ -414,6 +504,7 @@ FROM (
   UNION ALL SELECT 10006, '核销管理', 6, 'verify', 'xiayu/verify', 'XyVerify', 'xy:reservation:verify', 'validCode'
   UNION ALL SELECT 10007, '财务对账', 7, 'finance', 'xiayu/finance', 'XyFinance', 'xy:finance:view', 'money'
   UNION ALL SELECT 10008, '员工权限', 8, 'staff', 'xiayu/staff', 'XyStaff', 'xy:staff:list', 'people'
+  UNION ALL SELECT 10009, '福利钓专场', 5, 'benefit-events', 'xiayu/benefit-events', 'XyBenefitEvents', 'xy:benefit:list', 'star'
 ) AS menus
 WHERE NOT EXISTS (SELECT 1 FROM sys_menu existing_menu WHERE existing_menu.menu_id = menus.menu_id);
 
@@ -425,10 +516,12 @@ FROM (
   UNION ALL SELECT 10013, '会员套餐维护', 10002, 'xy:member:plan'
   UNION ALL SELECT 10014, '线下收退款', 10007, 'xy:finance:collect'
   UNION ALL SELECT 10015, '会员资料维护', 10002, 'xy:member:edit'
+  UNION ALL SELECT 10016, '福利钓维护', 10009, 'xy:benefit:edit'
+  UNION ALL SELECT 10017, '福利钓资金处理', 10009, 'xy:benefit:refund'
 ) AS permissions
 WHERE NOT EXISTS (SELECT 1 FROM sys_menu existing_menu WHERE existing_menu.menu_id = permissions.menu_id);
 
 INSERT INTO sys_role_menu (role_id, menu_id)
 SELECT 1, menu.menu_id FROM sys_menu menu
-WHERE menu.menu_id BETWEEN 10000 AND 10015
+WHERE menu.menu_id BETWEEN 10000 AND 10017
   AND NOT EXISTS (SELECT 1 FROM sys_role_menu role_menu WHERE role_menu.role_id = 1 AND role_menu.menu_id = menu.menu_id);

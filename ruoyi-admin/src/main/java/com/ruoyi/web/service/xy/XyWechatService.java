@@ -123,6 +123,71 @@ public class XyWechatService
         return properties.getSubscribeReservationTemplateId();
     }
 
+    public String getBenefitStartTemplateId()
+    {
+        return properties.getSubscribeBenefitStartTemplateId();
+    }
+
+    public String getBenefitCancelTemplateId()
+    {
+        return properties.getSubscribeBenefitCancelTemplateId();
+    }
+
+    public boolean isBenefitNoticeConfigured(String noticeType)
+    {
+        return !StringUtils.isEmpty("START".equals(noticeType)
+                ? properties.getSubscribeBenefitStartTemplateId()
+                : properties.getSubscribeBenefitCancelTemplateId());
+    }
+
+    /** 发送福利钓开始或取消通知。模板字段名可通过生产环境变量适配微信后台模板。 */
+    @SuppressWarnings("unchecked")
+    public String sendBenefitNotice(String noticeType, String openid, String storeName,
+            LocalDateTime eventTime, String note)
+    {
+        String templateId = "START".equals(noticeType)
+                ? properties.getSubscribeBenefitStartTemplateId()
+                : properties.getSubscribeBenefitCancelTemplateId();
+        if (StringUtils.isEmpty(templateId)) return "未配置福利钓订阅消息模板";
+        if (StringUtils.isEmpty(openid)) return "用户缺少微信 OpenID";
+        try
+        {
+            Map<String, Object> data = new LinkedHashMap<>();
+            String title = "START".equals(noticeType) ? "福利钓专场即将开始" : "福利钓专场已取消";
+            data.put(properties.getSubscribeBenefitTitleField(), messageValue(limit(title, 20)));
+            data.put(properties.getSubscribeBenefitTimeField(), messageValue(REMINDER_TIME.format(eventTime)));
+            data.put(properties.getSubscribeBenefitNoteField(), messageValue(limit(
+                    StringUtils.isEmpty(note) ? storeName : note, 20)));
+
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("touser", openid);
+            payload.put("template_id", templateId);
+            payload.put("page", properties.getSubscribeBenefitPage());
+            payload.put("lang", "zh_CN");
+            payload.put("data", data);
+
+            HttpHeaders headers = new HttpHeaders();
+            headers.setContentType(MediaType.APPLICATION_JSON);
+            HttpEntity<String> request = new HttpEntity<>(objectMapper.writeValueAsString(payload), headers);
+            ResponseEntity<String> response = restTemplate.postForEntity(SUBSCRIBE_SEND_URL,
+                    request, String.class, accessToken());
+            Map<String, Object> body = objectMapper.readValue(response.getBody(), Map.class);
+            Number errorCode = body.get("errcode") instanceof Number ? (Number) body.get("errcode") : null;
+            if (errorCode != null && errorCode.intValue() != 0)
+            {
+                String message = "微信福利钓订阅消息发送失败，errcode=" + errorCode;
+                log.warn(message);
+                return limit(message, 500);
+            }
+            return null;
+        }
+        catch (Exception ex)
+        {
+            log.warn("微信福利钓订阅消息发送失败，异常类型={}", ex.getClass().getSimpleName());
+            return "微信订阅消息服务调用异常（" + ex.getClass().getSimpleName() + "）";
+        }
+    }
+
     /**
      * 发送预约订阅消息。成功返回 null，失败返回可记录的原因；模板字段名由部署环境配置。
      */

@@ -143,6 +143,11 @@ public class XyWechatPayService
 
     public Map<String, Object> refund(String transactionId, String refundNo, int totalFen, int refundFen)
     {
+        return refund(transactionId, refundNo, totalFen, refundFen, "用户售后退款");
+    }
+
+    public Map<String, Object> refund(String transactionId, String refundNo, int totalFen, int refundFen, String reason)
+    {
         requireCommonConfig();
         if (StringUtils.isEmpty(properties.getRefundNotifyUrl())) throw new ServiceException("微信退款回调地址未配置");
         if (StringUtils.isEmpty(transactionId) || totalFen <= 0 || refundFen <= 0 || refundFen > totalFen)
@@ -157,7 +162,7 @@ public class XyWechatPayService
             Map<String, Object> body = new HashMap<>();
             body.put("transaction_id", transactionId);
             body.put("out_refund_no", refundNo);
-            body.put("reason", "用户售后退款");
+            body.put("reason", StringUtils.isEmpty(reason) ? "商家后台处理" : reason.substring(0, Math.min(reason.length(), 80)));
             body.put("notify_url", properties.getRefundNotifyUrl());
             body.put("amount", amount);
             return mapper.readValue(post(path, body).getBody(), Map.class);

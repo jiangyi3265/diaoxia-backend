@@ -50,6 +50,9 @@ class XyBusinessFlowIntegrationTest
     private XyWechatPayService payService;
 
     @Autowired
+    private XyBenefitEventService benefitEventService;
+
+    @Autowired
     private JdbcTemplate jdbc;
 
     @Autowired
@@ -245,5 +248,75 @@ class XyBusinessFlowIntegrationTest
         Long reusedMemberId = service.saveAdminMember(null, manual);
         assertEquals(wechatMemberId, reusedMemberId);
         assertEquals(1, jdbc.queryForObject("select count(1) from xy_member where mobile=?", Integer.class, mobile));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void benefitEventSupportsPaidSeatMapPerEventLimitAndAdminFundsFlow()
+    {
+        String suffix = UUID.randomUUID().toString().replace("-", "");
+        Map<String, Object> login = service.loginByOpenId("benefit_" + suffix, null);
+        memberToken = String.valueOf(login.get("memberToken"));
+        Long memberId = service.requireMember(memberToken);
+        String mobile = "136" + String.format("%08d", Integer.toUnsignedLong(suffix.hashCode()) % 100000000L);
+        jdbc.update("update xy_member set mobile=? where member_id=?", mobile, memberId);
+        jdbc.update("insert into xy_store(store_name,address,phone,business_hours) values(?,?,?,?)",
+                "福利钓测试门店" + suffix.substring(0, 6), "测试地址", "13800000000", "10:00-22:15");
+        Long storeId = jdbc.queryForObject("select last_insert_id()", Long.class);
+
+        Map<String, Object> eventInput = new HashMap<>();
+        eventInput.put("storeId", storeId);
+        eventInput.put("eventDate", LocalDate.now().plusDays(1).toString());
+        eventInput.put("announcement", "测试奖品：第一名礼品一份。人数不限，商家确认后正常开始。");
+        eventInput.put("status", "OPEN");
+        Map<String, Object> firstEvent = benefitEventService.saveEvent(null, eventInput, "integration-test");
+        Long firstEventId = ((Number) firstEvent.get("eventId")).longValue();
+
+        Map<String, Object> bookingInput = new HashMap<>();
+        bookingInput.put("seatNo", 22);
+        bookingInput.put("announcementVersion", firstEvent.get("announcementVersion"));
+        bookingInput.put("announcementConfirmed", true);
+        bookingInput.put("startNoticeAccepted", false);
+        bookingInput.put("cancelNoticeAccepted", false);
+        Map<String, Object> firstBooking = benefitEventService.createBookingPayment(memberId, firstEventId, bookingInput);
+        assertEquals(true, firstBooking.get("paid"));
+        assertEquals("BOOKED", jdbc.queryForObject(
+                "select status from xy_benefit_booking where booking_no=?", String.class, firstBooking.get("bookingNo")));
+        Map<String, Object> publicEvent = benefitEventService.publicEvent(firstEventId, memberId);
+        List<Map<String, Object>> seats = (List<Map<String, Object>>) publicEvent.get("seats");
+        assertEquals("UNAVAILABLE", seats.get(21).get("status"));
+        bookingInput.put("seatNo", 21);
+        assertThrows(ServiceException.class,
+                () -> benefitEventService.createBookingPayment(memberId, firstEventId, bookingInput));
+
+        eventInput.put("eventDate", LocalDate.now().plusDays(2).toString());
+        Map<String, Object> secondEvent = benefitEventService.saveEvent(null, eventInput, "integration-test");
+        bookingInput.put("announcementVersion", secondEvent.get("announcementVersion"));
+        Map<String, Object> secondBooking = benefitEventService.createBookingPayment(memberId,
+                ((Number) secondEvent.get("eventId")).longValue(), bookingInput);
+        assertEquals(true, secondBooking.get("paid"));
+        Long secondBookingId = jdbc.queryForObject(
+                "select booking_id from xy_benefit_booking where booking_no=?", Long.class, secondBooking.get("bookingNo"));
+        benefitEventService.refundBooking(secondBookingId, "集成测试单座处理", "integration-test");
+        assertEquals("CLOSED", jdbc.queryForObject(
+                "select status from xy_benefit_booking where booking_id=?", String.class, secondBookingId));
+        assertEquals("REFUNDED", jdbc.queryForObject(
+                "select status from xy_payment where business_type='BENEFIT_EVENT' and business_id=?", String.class, secondBookingId));
+
+        eventInput.put("eventDate", LocalDate.now().plusDays(3).toString());
+        Map<String, Object> thirdEvent = benefitEventService.saveEvent(null, eventInput, "integration-test");
+        bookingInput.put("announcementVersion", thirdEvent.get("announcementVersion"));
+        Map<String, Object> thirdBooking = benefitEventService.createBookingPayment(memberId,
+                ((Number) thirdEvent.get("eventId")).longValue(), bookingInput);
+        Long thirdBookingId = jdbc.queryForObject(
+                "select booking_id from xy_benefit_booking where booking_no=?", Long.class, thirdBooking.get("bookingNo"));
+        benefitEventService.cancelEvent(((Number) thirdEvent.get("eventId")).longValue(), "测试整场取消", "integration-test");
+        assertEquals("CANCELED", jdbc.queryForObject(
+                "select status from xy_benefit_event where event_id=?", String.class, thirdEvent.get("eventId")));
+        assertEquals("CLOSED", jdbc.queryForObject(
+                "select status from xy_benefit_booking where booking_id=?", String.class, thirdBookingId));
+        assertEquals("专场已取消", benefitEventService.memberBookings(memberId).stream()
+                .filter(row -> thirdBooking.get("bookingNo").equals(row.get("bookingNo")))
+                .findFirst().orElseThrow().get("displayStatus"));
     }
 }

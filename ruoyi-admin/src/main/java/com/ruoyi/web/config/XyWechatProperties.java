@@ -14,6 +14,12 @@ public class XyWechatProperties
     private String subscribeReservationPage = "pages/reserve/history";
     private String subscribeReservationTitleField = "thing1";
     private String subscribeReservationTimeField = "time2";
+    private String subscribeBenefitStartTemplateId;
+    private String subscribeBenefitCancelTemplateId;
+    private String subscribeBenefitPage = "pages/benefit/history";
+    private String subscribeBenefitTitleField = "thing1";
+    private String subscribeBenefitTimeField = "time2";
+    private String subscribeBenefitNoteField = "thing3";
 
     public String getAppId() { return appId; }
     public void setAppId(String appId) { this.appId = appId; }
@@ -27,4 +33,16 @@ public class XyWechatProperties
     public void setSubscribeReservationTitleField(String subscribeReservationTitleField) { this.subscribeReservationTitleField = subscribeReservationTitleField; }
     public String getSubscribeReservationTimeField() { return subscribeReservationTimeField; }
     public void setSubscribeReservationTimeField(String subscribeReservationTimeField) { this.subscribeReservationTimeField = subscribeReservationTimeField; }
+    public String getSubscribeBenefitStartTemplateId() { return subscribeBenefitStartTemplateId; }
+    public void setSubscribeBenefitStartTemplateId(String subscribeBenefitStartTemplateId) { this.subscribeBenefitStartTemplateId = subscribeBenefitStartTemplateId; }
+    public String getSubscribeBenefitCancelTemplateId() { return subscribeBenefitCancelTemplateId; }
+    public void setSubscribeBenefitCancelTemplateId(String subscribeBenefitCancelTemplateId) { this.subscribeBenefitCancelTemplateId = subscribeBenefitCancelTemplateId; }
+    public String getSubscribeBenefitPage() { return subscribeBenefitPage; }
+    public void setSubscribeBenefitPage(String subscribeBenefitPage) { this.subscribeBenefitPage = subscribeBenefitPage; }
+    public String getSubscribeBenefitTitleField() { return subscribeBenefitTitleField; }
+    public void setSubscribeBenefitTitleField(String subscribeBenefitTitleField) { this.subscribeBenefitTitleField = subscribeBenefitTitleField; }
+    public String getSubscribeBenefitTimeField() { return subscribeBenefitTimeField; }
+    public void setSubscribeBenefitTimeField(String subscribeBenefitTimeField) { this.subscribeBenefitTimeField = subscribeBenefitTimeField; }
+    public String getSubscribeBenefitNoteField() { return subscribeBenefitNoteField; }
+    public void setSubscribeBenefitNoteField(String subscribeBenefitNoteField) { this.subscribeBenefitNoteField = subscribeBenefitNoteField; }
 }

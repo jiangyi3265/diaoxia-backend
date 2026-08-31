@@ -25,6 +25,7 @@ import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.web.service.xy.XyBusinessService;
 import com.ruoyi.web.service.xy.XyWechatService;
 import com.ruoyi.web.service.xy.XyWechatPayService;
+import com.ruoyi.web.service.xy.XyBenefitEventService;
 
 /** 小程序业务接口。身份由 X-App-Token 表示，不能与后台管理员 JWT 混用。 */
 @RestController
@@ -35,12 +36,15 @@ public class XyAppController
     private final XyBusinessService service;
     private final XyWechatService wechatService;
     private final XyWechatPayService wechatPayService;
+    private final XyBenefitEventService benefitEventService;
 
-    public XyAppController(XyBusinessService service, XyWechatService wechatService, XyWechatPayService wechatPayService)
+    public XyAppController(XyBusinessService service, XyWechatService wechatService,
+            XyWechatPayService wechatPayService, XyBenefitEventService benefitEventService)
     {
         this.service = service;
         this.wechatService = wechatService;
         this.wechatPayService = wechatPayService;
+        this.benefitEventService = benefitEventService;
     }
 
     @Anonymous
@@ -74,7 +78,40 @@ public class XyAppController
     {
         Map<String, Object> result = new HashMap<>();
         result.put("reservationReminderTemplateId", wechatService.getReservationReminderTemplateId());
+        result.put("benefitStartTemplateId", wechatService.getBenefitStartTemplateId());
+        result.put("benefitCancelTemplateId", wechatService.getBenefitCancelTemplateId());
         return AjaxResult.success(result);
+    }
+
+    @Anonymous
+    @GetMapping("/benefit-events")
+    public AjaxResult benefitEvents(@RequestHeader(value = "X-App-Token", required = false) String token)
+    {
+        return AjaxResult.success(benefitEventService.publicEvents(service.optionalMember(token)));
+    }
+
+    @Anonymous
+    @GetMapping("/benefit-events/{eventId}")
+    public AjaxResult benefitEvent(@PathVariable Long eventId,
+            @RequestHeader(value = "X-App-Token", required = false) String token)
+    {
+        return AjaxResult.success(benefitEventService.publicEvent(eventId, service.optionalMember(token)));
+    }
+
+    @Anonymous
+    @PostMapping("/benefit-events/{eventId}/bookings/payment")
+    public AjaxResult benefitBookingPayment(@PathVariable Long eventId,
+            @RequestHeader(value = "X-App-Token", required = false) String token,
+            @RequestBody Map<String, Object> body)
+    {
+        return AjaxResult.success(benefitEventService.createBookingPayment(service.requireMember(token), eventId, body));
+    }
+
+    @Anonymous
+    @GetMapping("/benefit-bookings")
+    public AjaxResult benefitBookings(@RequestHeader(value = "X-App-Token", required = false) String token)
+    {
+        return AjaxResult.success(benefitEventService.memberBookings(service.requireMember(token)));
     }
 
     @Anonymous
@@ -206,7 +243,11 @@ public class XyAppController
             if (!"SUCCESS".equals(data.get("trade_state"))) throw new ServiceException("微信支付未成功");
             Map amount = (Map) data.get("amount");
             if (amount == null || !(amount.get("total") instanceof Number)) throw new ServiceException("微信支付回调金额缺失");
-            service.completeWechatPayment(String.valueOf(data.get("out_trade_no")), String.valueOf(data.get("transaction_id")), ((Number) amount.get("total")).intValue());
+            String paymentNo = String.valueOf(data.get("out_trade_no"));
+            String transactionId = String.valueOf(data.get("transaction_id"));
+            int total = ((Number) amount.get("total")).intValue();
+            if (!benefitEventService.completeWechatPaymentIfApplicable(paymentNo, transactionId, total))
+                service.completeWechatPayment(paymentNo, transactionId, total);
             return ResponseEntity.ok(callbackResult("SUCCESS", "成功"));
         }
         catch (RuntimeException ex)
@@ -228,8 +269,13 @@ public class XyAppController
             wechatPayService.validateNotificationIdentity(data);
             String refundNo = String.valueOf(data.get("out_refund_no"));
             String refundId = String.valueOf(data.get("refund_id"));
-            if ("SUCCESS".equals(data.get("refund_status"))) service.completeRefund(refundNo, refundId);
-            else service.failRefund(refundNo, refundId);
+            if ("SUCCESS".equals(data.get("refund_status")))
+            {
+                if (!benefitEventService.completeRefundIfApplicable(refundNo, refundId))
+                    service.completeRefund(refundNo, refundId);
+            }
+            else if (!benefitEventService.failRefundIfApplicable(refundNo, refundId))
+                service.failRefund(refundNo, refundId);
             return ResponseEntity.ok(callbackResult("SUCCESS", "成功"));
         }
         catch (RuntimeException ex)
