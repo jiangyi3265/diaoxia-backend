@@ -12,6 +12,7 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.Signature;
 import java.time.Instant;
+import java.time.LocalDateTime;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -95,6 +96,15 @@ class XyWechatPayServicePublicKeyTest
     void acceptsCompleteWechatPayPublicKeyConfiguration()
     {
         assertTrue(service.isWechatPayConfigured());
+    }
+
+    @Test
+    void includesTheSeatHoldDeadlineInWechatPrepayRequest()
+    {
+        Map<String, Object> body = service.buildJsapiRequestBody("FP20260901", "openid", 10000,
+                "福利钓专场", LocalDateTime.of(2026, 9, 1, 12, 34, 56));
+        assertEquals("2026-09-01T12:34:56+08:00", body.get("time_expire"));
+        assertEquals(10000, ((Map<?, ?>) body.get("amount")).get("total"));
     }
 
     @Test

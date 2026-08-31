@@ -14,6 +14,9 @@ import java.security.cert.X509Certificate;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
@@ -25,22 +28,26 @@ import javax.crypto.spec.SecretKeySpec;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestTemplate;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.web.config.XyWechatPayProperties;
 
-/** 微信支付 API v3：JSAPI 下单、退款、平台响应验签和回调解密。 */
+/** 微信支付 API v3：JSAPI 下单/查单/关单、退款/退款查询、平台响应验签和回调解密。 */
 @Service
 public class XyWechatPayService
 {
     private static final String API_HOST = "https://api.mch.weixin.qq.com";
     private static final long CALLBACK_MAX_AGE_SECONDS = 300;
+    private static final ZoneId CHINA_ZONE = ZoneId.of("Asia/Shanghai");
+    private static final DateTimeFormatter WECHAT_TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ssXXX");
 
     private final XyWechatPayProperties properties;
     private final ObjectMapper mapper = new ObjectMapper();
@@ -96,20 +103,22 @@ public class XyWechatPayService
 
     public Map<String, Object> jsapi(String orderNo, String openid, int amountFen, String description)
     {
+        return jsapi(orderNo, openid, amountFen, description, null);
+    }
+
+    /**
+     * 创建小程序支付单。限时占座业务必须传入支付结束时间，避免本地释放座位后微信收银台仍可付款。
+     */
+    public Map<String, Object> jsapi(String orderNo, String openid, int amountFen, String description,
+            LocalDateTime expiresTime)
+    {
         requireCommonConfig();
         if (StringUtils.isEmpty(properties.getNotifyUrl())) throw new ServiceException("微信支付回调地址未配置");
         if (StringUtils.isEmpty(openid) || amountFen <= 0) throw new ServiceException("支付参数不合法");
         try
         {
             String path = "/v3/pay/transactions/jsapi";
-            Map<String, Object> body = new HashMap<>();
-            body.put("appid", properties.getAppId());
-            body.put("mchid", properties.getMchId());
-            body.put("description", description);
-            body.put("out_trade_no", orderNo);
-            body.put("notify_url", properties.getNotifyUrl());
-            body.put("amount", Collections.singletonMap("total", amountFen));
-            body.put("payer", Collections.singletonMap("openid", openid));
+            Map<String, Object> body = buildJsapiRequestBody(orderNo, openid, amountFen, description, expiresTime);
             ResponseEntity<String> raw = post(path, body);
             Map<?, ?> response = mapper.readValue(raw.getBody(), Map.class);
             if (response.get("prepay_id") == null) throw new ServiceException("微信支付预下单失败");
@@ -124,6 +133,51 @@ public class XyWechatPayService
         {
             throw new ServiceException("微信支付服务调用失败，请稍后重试");
         }
+    }
+
+    Map<String, Object> buildJsapiRequestBody(String orderNo, String openid, int amountFen, String description,
+            LocalDateTime expiresTime)
+    {
+        Map<String, Object> body = new HashMap<>();
+        body.put("appid", properties.getAppId());
+        body.put("mchid", properties.getMchId());
+        body.put("description", description);
+        body.put("out_trade_no", orderNo);
+        if (expiresTime != null)
+            body.put("time_expire", expiresTime.atZone(CHINA_ZONE).format(WECHAT_TIME));
+        body.put("notify_url", properties.getNotifyUrl());
+        body.put("amount", Collections.singletonMap("total", amountFen));
+        body.put("payer", Collections.singletonMap("openid", openid));
+        return body;
+    }
+
+    /** 按商户订单号查询微信支付订单，返回 trade_state、transaction_id、amount 等官方字段。 */
+    public Map<String, Object> queryOrder(String orderNo)
+    {
+        requireCommonConfig();
+        if (StringUtils.isEmpty(orderNo)) throw new ServiceException("微信支付订单号不能为空");
+        try
+        {
+            String path = "/v3/pay/transactions/out-trade-no/" + orderNo + "?mchid=" + properties.getMchId();
+            return mapper.readValue(get(path).getBody(), new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+        }
+        catch (ServiceException ex) { throw ex; }
+        catch (Exception ex) { throw new ServiceException("微信支付订单查询失败，请稍后重试"); }
+    }
+
+    /** 关闭仍为未支付状态的微信订单。关单成功后，本地占座才可以安全释放。 */
+    public void closeOrder(String orderNo)
+    {
+        requireCommonConfig();
+        if (StringUtils.isEmpty(orderNo)) throw new ServiceException("微信支付订单号不能为空");
+        try
+        {
+            Map<String, Object> body = new HashMap<>();
+            body.put("mchid", properties.getMchId());
+            post("/v3/pay/transactions/out-trade-no/" + orderNo + "/close", body);
+        }
+        catch (ServiceException ex) { throw ex; }
+        catch (Exception ex) { throw new ServiceException("微信支付关单失败，请稍后重试"); }
     }
 
     Map<String, Object> buildJsapiPaymentParameters(String prepayId) throws Exception
@@ -177,6 +231,27 @@ public class XyWechatPayService
         }
     }
 
+    /**
+     * 查询退款最终状态。返回空 Map 表示微信侧尚无该退款单，调用方可用相同商户退款单号幂等重试。
+     */
+    public Map<String, Object> queryRefund(String refundNo)
+    {
+        requireCommonConfig();
+        if (StringUtils.isEmpty(refundNo)) throw new ServiceException("商户退款单号不能为空");
+        try
+        {
+            return mapper.readValue(get("/v3/refund/domestic/refunds/" + refundNo).getBody(),
+                    new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+        }
+        catch (HttpStatusCodeException ex)
+        {
+            if (ex.getStatusCode() == HttpStatus.NOT_FOUND) return Collections.emptyMap();
+            throw new ServiceException("微信退款状态查询失败，请稍后重试");
+        }
+        catch (ServiceException ex) { throw ex; }
+        catch (Exception ex) { throw new ServiceException("微信退款状态查询失败，请稍后重试"); }
+    }
+
     public Map<?, ?> verifyCallback(String timestamp, String nonce, String signature, String serial, String body)
     {
         try
@@ -228,6 +303,22 @@ public class XyWechatPayService
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.set("Authorization", authorization);
         ResponseEntity<String> response = http.exchange(API_HOST + path, HttpMethod.POST, new HttpEntity<>(json, headers), String.class);
+        verifyResponse(response);
+        return response;
+    }
+
+    private ResponseEntity<String> get(String path) throws Exception
+    {
+        String timestamp = String.valueOf(Instant.now().getEpochSecond());
+        String nonce = nonce();
+        String authorization = "WECHATPAY2-SHA256-RSA2048 mchid=\"" + properties.getMchId()
+                + "\",nonce_str=\"" + nonce + "\",timestamp=\"" + timestamp + "\",serial_no=\""
+                + properties.getMerchantSerialNo() + "\",signature=\""
+                + sign("GET\n" + path + "\n" + timestamp + "\n" + nonce + "\n\n") + "\"";
+        HttpHeaders headers = new HttpHeaders();
+        headers.set("Authorization", authorization);
+        ResponseEntity<String> response = http.exchange(API_HOST + path, HttpMethod.GET,
+                new HttpEntity<>(headers), String.class);
         verifyResponse(response);
         return response;
     }

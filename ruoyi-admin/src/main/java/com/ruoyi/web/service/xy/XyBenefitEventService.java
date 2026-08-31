@@ -20,6 +20,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ruoyi.common.exception.ServiceException;
@@ -44,14 +45,16 @@ public class XyBenefitEventService
     private final ObjectMapper objectMapper;
     private final XyWechatPayService payService;
     private final XyWechatService wechatService;
+    private final TransactionTemplate transactionTemplate;
 
     public XyBenefitEventService(JdbcTemplate jdbcTemplate, ObjectMapper objectMapper,
-            XyWechatPayService payService, XyWechatService wechatService)
+            XyWechatPayService payService, XyWechatService wechatService, TransactionTemplate transactionTemplate)
     {
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
         this.payService = payService;
         this.wechatService = wechatService;
+        this.transactionTemplate = transactionTemplate;
     }
 
     @Scheduled(fixedDelayString = "${xy.maintenance-interval-ms:60000}")
@@ -71,6 +74,7 @@ public class XyBenefitEventService
             try { initiateBookingRefund(bookingId, "福利钓专场取消", "system"); }
             catch (RuntimeException ignored) { /* 失败状态会保留在后台，下一轮或管理员可重试。 */ }
         }
+        reconcileProcessingRefunds();
         dispatchDueNotices();
     }
 
@@ -160,7 +164,8 @@ public class XyBenefitEventService
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
                 "select b.booking_no as bookingNo,b.seat_no as seatNo,b.status,e.event_date as eventDate,"
                         + "date_format(e.start_time,'%H:%i') as startTime,date_format(e.end_time,'%H:%i') as endTime,"
-                        + "e.status as eventStatus,e.announcement as announcement,st.store_name as storeName,st.address,st.phone "
+                        + "e.status as eventStatus,b.announcement_snapshot as announcement,"
+                        + "b.announcement_version as announcementVersion,st.store_name as storeName,st.address,st.phone "
                         + "from xy_benefit_booking b join xy_benefit_event e on e.event_id=b.event_id "
                         + "join xy_store st on st.store_id=e.store_id where b.member_id=? "
                         + "order by e.event_date desc,b.booking_id desc",
@@ -182,11 +187,12 @@ public class XyBenefitEventService
         if (!booleanValue(body.get("announcementConfirmed"))) throw new ServiceException("请先阅读并确认本场公告");
 
         List<Map<String, Object>> members = jdbcTemplate.queryForList(
-                "select member_id,openid,mobile from xy_member where member_id=? and status='0' for update", memberId);
+                "select member_id,openid,mobile,mobile_verified_at from xy_member where member_id=? and status='0' for update", memberId);
         if (members.isEmpty()) throw new ServiceException("用户状态异常，请重新登录");
         Map<String, Object> member = members.get(0);
         String mobile = string(member.get("mobile"));
-        if (!mobile.matches("^1\\d{10}$")) throw new ServiceException("请先授权微信手机号后再报名");
+        if (!mobile.matches("^1\\d{10}$") || member.get("mobile_verified_at") == null)
+            throw new ServiceException("请先使用微信授权并验证手机号后再报名");
 
         List<Map<String, Object>> events = jdbcTemplate.queryForList(
                 "select event_id,event_no,event_date,start_time,end_time,signup_deadline,fee_amount,announcement,"
@@ -259,7 +265,7 @@ public class XyBenefitEventService
         else
         {
             Map<String, Object> payload = payService.jsapi(paymentNo, string(member.get("openid")), 10000,
-                    "福利钓专场 " + eventDate);
+                    "福利钓专场 " + eventDate, expiresTime.toLocalDateTime());
             result.putAll(payload);
             try
             {
@@ -312,21 +318,60 @@ public class XyBenefitEventService
         if (totalFen == null || cents(payment.get("amount")) != totalFen)
             throw new ServiceException("支付金额校验失败");
         if (StringUtils.isEmpty(transactionId)) throw new ServiceException("支付交易号不能为空");
-        if ("SUCCESS".equals(string(payment.get("status"))))
+        String paymentStatus = string(payment.get("status"));
+        if ("SUCCESS".equals(paymentStatus) || "REFUNDING".equals(paymentStatus) || "REFUNDED".equals(paymentStatus))
         {
             if (!transactionId.equals(string(payment.get("transaction_id"))))
                 throw new ServiceException("支付交易号与已入账记录不一致");
             return;
         }
-        if (!"PENDING".equals(string(payment.get("status")))) throw new ServiceException("支付单状态异常");
+        if ("CLOSED".equals(paymentStatus))
+        {
+            queueLatePaymentRefund(payment, paymentNo, transactionId);
+            return;
+        }
+        if (!"PENDING".equals(paymentStatus)) throw new ServiceException("支付单状态异常");
         Long bookingId = ((Number) payment.get("business_id")).longValue();
         int updated = jdbcTemplate.update(
                 "update xy_benefit_booking set status='BOOKED',expires_time=null,payment_payload=null,booked_time=now() "
                         + "where booking_id=? and status='PENDING_PAYMENT'", bookingId);
-        if (updated != 1) throw new ServiceException("报名状态异常，无法完成支付");
+        if (updated != 1)
+        {
+            queueLatePaymentRefund(payment, paymentNo, transactionId);
+            return;
+        }
         jdbcTemplate.update(
                 "update xy_payment set status='SUCCESS',transaction_id=?,paid_time=now() where payment_no=?",
                 transactionId, paymentNo);
+    }
+
+    /** 微信在本地占座关闭后才通知成功时，不能重新占座，必须记录到账并自动排队原路退回。 */
+    private void queueLatePaymentRefund(Map<String, Object> payment, String paymentNo, String transactionId)
+    {
+        Long bookingId = ((Number) payment.get("business_id")).longValue();
+        String reason = "支付超过占座有效期，系统自动原路处理";
+        jdbcTemplate.update(
+                "update xy_payment set status='REFUNDING',transaction_id=?,paid_time=coalesce(paid_time,now()) where payment_no=?",
+                transactionId, paymentNo);
+        jdbcTemplate.update(
+                "update xy_benefit_booking set status='REFUNDING',seat_lock=null,member_lock=null,payment_payload=null,close_reason=? "
+                        + "where booking_id=? and status in('PENDING_PAYMENT','CLOSED')",
+                reason, bookingId);
+        List<Map<String, Object>> refunds = jdbcTemplate.queryForList(
+                "select refund_no,status from xy_benefit_refund where booking_id=? for update", bookingId);
+        if (refunds.isEmpty())
+        {
+            jdbcTemplate.update(
+                    "insert into xy_benefit_refund(booking_id,refund_no,amount,reason,status,create_by) "
+                            + "values(?,?,?,?, 'PROCESSING','system')",
+                    bookingId, nextNo("FR"), payment.get("amount"), reason);
+        }
+        else if (!"SUCCESS".equals(string(refunds.get(0).get("status"))))
+        {
+            jdbcTemplate.update(
+                    "update xy_benefit_refund set status='PROCESSING',reason=?,create_by='system' where booking_id=?",
+                    reason, bookingId);
+        }
     }
 
     public List<Map<String, Object>> adminEvents()
@@ -340,6 +385,7 @@ public class XyBenefitEventService
                         + "e.confirmed_time as confirmedTime,e.canceled_time as canceledTime,st.store_name as storeName,"
                         + "sum(case when b.status='BOOKED' then 1 else 0 end) as bookedCount,"
                         + "sum(case when b.status='PENDING_PAYMENT' then 1 else 0 end) as pendingCount,"
+                        + "sum(case when b.seat_lock=1 then 1 else 0 end) as lockedCount,"
                         + "sum(case when r.status='FAILED' then 1 else 0 end) as failedCount "
                         + "from xy_benefit_event e join xy_store st on st.store_id=e.store_id "
                         + "left join xy_benefit_booking b on b.event_id=e.event_id "
@@ -347,8 +393,8 @@ public class XyBenefitEventService
                         + "where e.event_date>=date_sub(curdate(),interval 7 day) "
                         + "group by e.event_id order by e.event_date desc,e.event_id desc");
         for (Map<String, Object> event : events)
-            event.put("remainingCount", SEAT_COUNT - ((Number) event.get("bookedCount")).intValue()
-                    - ((Number) event.get("pendingCount")).intValue());
+            event.put("remainingCount", Math.max(0,
+                    SEAT_COUNT - ((Number) event.get("lockedCount")).intValue()));
         return events;
     }
 
@@ -360,7 +406,8 @@ public class XyBenefitEventService
                 .findFirst().orElseThrow(() -> new ServiceException("福利钓专场不存在"));
         event.put("bookings", jdbcTemplate.queryForList(
                 "select b.booking_id as bookingId,b.booking_no as bookingNo,b.seat_no as seatNo,b.status,"
-                        + "b.booked_time as bookedTime,b.expires_time as expiresTime,m.nickname,m.mobile,"
+                        + "b.booked_time as bookedTime,b.expires_time as expiresTime,b.announcement_version as announcementVersion,"
+                        + "b.announcement_snapshot as announcementSnapshot,m.nickname,m.mobile,"
                         + "p.payment_no as paymentNo,p.amount,p.channel,p.status as paymentStatus,p.transaction_id as transactionId,"
                         + "r.refund_no as refundNo,r.refund_id as refundId,r.status as refundStatus,r.reason as refundReason "
                         + "from xy_benefit_booking b join xy_member m on m.member_id=b.member_id "
@@ -405,19 +452,27 @@ public class XyBenefitEventService
         else
         {
             List<Map<String, Object>> rows = jdbcTemplate.queryForList(
-                    "select event_id,announcement,status from xy_benefit_event where event_id=? for update", eventId);
+                    "select event_id,store_id,event_date,announcement,status from xy_benefit_event where event_id=? for update", eventId);
             if (rows.isEmpty()) throw new ServiceException("福利钓专场不存在");
-            String oldStatus = string(rows.get(0).get("status"));
+            Map<String, Object> current = rows.get(0);
+            String oldStatus = string(current.get("status"));
             if ("CANCELED".equals(oldStatus) || "FINISHED".equals(oldStatus))
                 throw new ServiceException("已取消或已结束的场次不能修改");
-            boolean changed = !Objects.equals(announcement, string(rows.get(0).get("announcement")));
+            boolean changed = !Objects.equals(announcement, string(current.get("announcement")));
+            String nextStatus = "CONFIRMED".equals(oldStatus) ? oldStatus : requestedStatus;
+            Integer activeBookings = jdbcTemplate.queryForObject(
+                    "select count(1) from xy_benefit_booking where event_id=? and seat_lock=1", Integer.class, eventId);
+            boolean materialChanged = ((Number) current.get("store_id")).longValue() != storeId.longValue()
+                    || !date.equals(asDate(current.get("event_date"))) || changed || !oldStatus.equals(nextStatus);
+            if (activeBookings != null && activeBookings > 0 && materialChanged)
+                throw new ServiceException("已有报名或待支付记录，不能修改门店、日期、公告或开放状态");
             try
             {
                 jdbcTemplate.update(
                         "update xy_benefit_event set store_id=?,event_date=?,announcement=?,"
                                 + "announcement_version=announcement_version+?,status=?,update_by=? where event_id=?",
                         storeId, date, announcement, changed ? 1 : 0,
-                        "CONFIRMED".equals(oldStatus) ? oldStatus : requestedStatus, operator, eventId);
+                        nextStatus, operator, eventId);
             }
             catch (DuplicateKeyException ex) { throw new ServiceException("该门店当天已经创建福利钓专场"); }
         }
@@ -475,51 +530,99 @@ public class XyBenefitEventService
     {
         String safeReason = string(reason).trim();
         if (safeReason.length() < 2 || safeReason.length() > 500) throw new ServiceException("请填写处理原因");
+        RefundTask task = transactionTemplate.execute(status -> prepareRefund(bookingId, safeReason, operator));
+        if (task != null) reconcileOrSubmitRefund(task);
+    }
+
+    private RefundTask prepareRefund(Long bookingId, String reason, String operator)
+    {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
                 "select b.booking_id,b.status,p.payment_id,p.payment_no,p.amount,p.channel,p.status as payment_status,"
-                        + "p.transaction_id,r.refund_no,r.status as refund_status from xy_benefit_booking b "
-                        + "join xy_payment p on p.business_type='BENEFIT_EVENT' and p.business_id=b.booking_id "
-                        + "left join xy_benefit_refund r on r.booking_id=b.booking_id where b.booking_id=?", bookingId);
+                        + "p.transaction_id,r.refund_no,r.status as refund_status,r.reason as refund_reason "
+                        + "from xy_benefit_booking b join xy_payment p on p.business_type='BENEFIT_EVENT' and p.business_id=b.booking_id "
+                        + "left join xy_benefit_refund r on r.booking_id=b.booking_id where b.booking_id=? for update", bookingId);
         if (rows.isEmpty()) throw new ServiceException("报名记录或支付流水不存在");
         Map<String, Object> row = rows.get(0);
-        if ("SUCCESS".equals(string(row.get("refund_status")))) return;
-        if ("PROCESSING".equals(string(row.get("refund_status")))) return;
-        if (!"SUCCESS".equals(string(row.get("payment_status")))) throw new ServiceException("该报名没有可处理的成功支付流水");
+        String refundStatus = string(row.get("refund_status"));
+        if ("SUCCESS".equals(refundStatus)) return null;
+        if ("PROCESSING".equals(refundStatus)) return refundTask(row, string(row.get("refund_reason")));
+        if (!"SUCCESS".equals(string(row.get("payment_status"))))
+            throw new ServiceException("该报名没有可处理的成功支付流水");
         int locked = jdbcTemplate.update(
-                "update xy_benefit_booking set status='REFUNDING',close_reason=? where booking_id=? and status='BOOKED'",
-                safeReason, bookingId);
+                "update xy_benefit_booking set status='REFUNDING',close_reason=? "
+                        + "where booking_id=? and status in('BOOKED','CLOSED')",
+                reason, bookingId);
         if (locked != 1) throw new ServiceException("该报名当前不能重复处理");
 
-        String refundNo = StringUtils.isEmpty(string(row.get("refund_no"))) ? nextNo("FR") : string(row.get("refund_no"));
+        String refundNo = StringUtils.isEmpty(string(row.get("refund_no"))) || "FAILED".equals(refundStatus)
+                ? nextNo("FR") : string(row.get("refund_no"));
         if (StringUtils.isEmpty(string(row.get("refund_no"))))
             jdbcTemplate.update(
                     "insert into xy_benefit_refund(booking_id,refund_no,amount,reason,status,create_by) values(?,?,?,?, 'PROCESSING',?)",
-                    bookingId, refundNo, row.get("amount"), safeReason, operator);
+                    bookingId, refundNo, row.get("amount"), reason, operator);
         else
             jdbcTemplate.update(
-                    "update xy_benefit_refund set status='PROCESSING',reason=?,create_by=?,refund_id=null where booking_id=?",
-                    safeReason, operator, bookingId);
+                    "update xy_benefit_refund set refund_no=?,status='PROCESSING',reason=?,create_by=?,refund_id=null,complete_time=null "
+                            + "where booking_id=?",
+                    refundNo, reason, operator, bookingId);
         jdbcTemplate.update("update xy_payment set status='REFUNDING' where payment_id=?", row.get("payment_id"));
+        row.put("refund_no", refundNo);
+        return refundTask(row, reason);
+    }
+
+    private RefundTask refundTask(Map<String, Object> row, String reason)
+    {
+        return new RefundTask(((Number) row.get("booking_id")).longValue(), string(row.get("refund_no")),
+                string(row.get("transaction_id")), cents(row.get("amount")), string(row.get("channel")), reason);
+    }
+
+    /** 查询优先、同号幂等提交兜底，可覆盖回调丢失及进程在请求前后中断的情况。 */
+    private void reconcileOrSubmitRefund(RefundTask task)
+    {
         try
         {
-            if ("DEMO".equals(string(row.get("channel"))))
+            if ("DEMO".equals(task.channel))
             {
-                completeBenefitRefund(refundNo, "DEMO-" + nextNo("RID"));
+                transactionTemplate.execute(status -> { completeBenefitRefund(task.refundNo, "DEMO-" + nextNo("RID")); return null; });
                 return;
             }
-            if (!"WECHAT".equals(string(row.get("channel")))) throw new ServiceException("该支付渠道不能在线处理");
-            int amountFen = cents(row.get("amount"));
-            Map<String, Object> response = payService.refund(string(row.get("transaction_id")), refundNo,
-                    amountFen, amountFen, safeReason);
-            String refundId = string(response.get("refund_id"));
-            jdbcTemplate.update("update xy_benefit_refund set refund_id=? where refund_no=?", refundId, refundNo);
-            if ("SUCCESS".equals(string(response.get("status")))) completeBenefitRefund(refundNo, refundId);
+            if (!"WECHAT".equals(task.channel)) throw new ServiceException("该支付渠道不能在线处理");
+            Map<String, Object> response = payService.queryRefund(task.refundNo);
+            if (response.isEmpty())
+                response = payService.refund(task.transactionId, task.refundNo, task.amountFen, task.amountFen, task.reason);
+            applyRefundResponse(task.refundNo, response);
         }
-        catch (RuntimeException ex)
+        catch (RuntimeException ignored)
         {
-            failBenefitRefund(refundNo, null);
-            throw ex;
+            // 保持 PROCESSING；定时任务会继续用同一退款单号查询或幂等提交，避免误判失败后重复打款。
         }
+    }
+
+    private void applyRefundResponse(String refundNo, Map<String, Object> response)
+    {
+        String refundId = string(response.get("refund_id"));
+        String status = string(response.get("status"));
+        transactionTemplate.execute(tx ->
+        {
+            if (!StringUtils.isEmpty(refundId))
+                jdbcTemplate.update("update xy_benefit_refund set refund_id=? where refund_no=?", refundId, refundNo);
+            if ("SUCCESS".equals(status)) completeBenefitRefund(refundNo, refundId);
+            else if ("CLOSED".equals(status) || "ABNORMAL".equals(status)) failBenefitRefund(refundNo, refundId);
+            return null;
+        });
+    }
+
+    private void reconcileProcessingRefunds()
+    {
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+                "select b.booking_id,p.transaction_id,p.amount,p.channel,r.refund_no,r.reason "
+                        + "from xy_benefit_refund r join xy_benefit_booking b on b.booking_id=r.booking_id "
+                        + "join xy_payment p on p.business_type='BENEFIT_EVENT' and p.business_id=b.booking_id "
+                        + "where r.status='PROCESSING' order by r.update_time limit 50");
+        for (Map<String, Object> row : rows)
+            reconcileOrSubmitRefund(new RefundTask(((Number) row.get("booking_id")).longValue(),
+                    string(row.get("refund_no")), string(row.get("transaction_id")), cents(row.get("amount")),
+                    string(row.get("channel")), string(row.get("reason"))));
     }
 
     @Transactional
@@ -564,12 +667,15 @@ public class XyBenefitEventService
     private void failBenefitRefund(String refundNo, String refundId)
     {
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
-                "select booking_id,status from xy_benefit_refund where refund_no=? for update", refundNo);
+                "select r.booking_id,r.status,b.seat_lock from xy_benefit_refund r "
+                        + "join xy_benefit_booking b on b.booking_id=r.booking_id where r.refund_no=? for update", refundNo);
         if (rows.isEmpty() || "SUCCESS".equals(string(rows.get(0).get("status")))) return;
         Long bookingId = ((Number) rows.get(0).get("booking_id")).longValue();
         jdbcTemplate.update(
                 "update xy_benefit_refund set status='FAILED',refund_id=? where refund_no=?", refundId, refundNo);
-        jdbcTemplate.update("update xy_benefit_booking set status='BOOKED' where booking_id=? and status='REFUNDING'", bookingId);
+        String restoredStatus = rows.get(0).get("seat_lock") == null ? "CLOSED" : "BOOKED";
+        jdbcTemplate.update("update xy_benefit_booking set status=? where booking_id=? and status='REFUNDING'",
+                restoredStatus, bookingId);
         jdbcTemplate.update(
                 "update xy_payment set status='SUCCESS' where business_type='BENEFIT_EVENT' and business_id=?",
                 bookingId);
@@ -639,12 +745,68 @@ public class XyBenefitEventService
 
     private void expirePendingBookings()
     {
-        jdbcTemplate.update(
-                "update xy_payment p join xy_benefit_booking b on p.business_type='BENEFIT_EVENT' and p.business_id=b.booking_id "
-                        + "set p.status='CLOSED' where b.status='PENDING_PAYMENT' and b.expires_time<now() and p.status='PENDING'");
-        jdbcTemplate.update(
-                "update xy_benefit_booking set status='CLOSED',seat_lock=null,member_lock=null,payment_payload=null "
-                        + "where status='PENDING_PAYMENT' and expires_time<now()");
+        List<Map<String, Object>> expired = jdbcTemplate.queryForList(
+                "select b.booking_id,p.payment_no,p.channel from xy_benefit_booking b "
+                        + "join xy_payment p on p.business_type='BENEFIT_EVENT' and p.business_id=b.booking_id "
+                        + "where b.status='PENDING_PAYMENT' and b.expires_time<now() and p.status='PENDING' "
+                        + "order by b.expires_time limit 50");
+        for (Map<String, Object> row : expired)
+        {
+            Long bookingId = ((Number) row.get("booking_id")).longValue();
+            String paymentNo = string(row.get("payment_no"));
+            String channel = string(row.get("channel"));
+            if (!"WECHAT".equals(channel))
+            {
+                closePendingLocally(bookingId, paymentNo);
+                continue;
+            }
+            if (!payService.isWechatPayConfigured()) continue;
+            try
+            {
+                Map<String, Object> order = payService.queryOrder(paymentNo);
+                String tradeState = string(order.get("trade_state"));
+                if ("SUCCESS".equals(tradeState))
+                {
+                    payService.validateNotificationIdentity(order);
+                    Object amountValue = order.get("amount");
+                    if (!(amountValue instanceof Map) || !(((Map<?, ?>) amountValue).get("total") instanceof Number))
+                        throw new ServiceException("微信支付查单金额缺失");
+                    int totalFen = ((Number) ((Map<?, ?>) amountValue).get("total")).intValue();
+                    String transactionId = string(order.get("transaction_id"));
+                    transactionTemplate.execute(status ->
+                    {
+                        completeBenefitPayment(paymentNo, transactionId, totalFen, "WECHAT");
+                        return null;
+                    });
+                }
+                else if ("NOTPAY".equals(tradeState))
+                {
+                    payService.closeOrder(paymentNo);
+                    closePendingLocally(bookingId, paymentNo);
+                }
+                else if ("CLOSED".equals(tradeState) || "REVOKED".equals(tradeState) || "PAYERROR".equals(tradeState))
+                {
+                    closePendingLocally(bookingId, paymentNo);
+                }
+            }
+            catch (RuntimeException ignored)
+            {
+                // 查单或关单未确认成功时继续保留座位，避免上游已收款而本地误释放。
+            }
+        }
+    }
+
+    private void closePendingLocally(Long bookingId, String paymentNo)
+    {
+        transactionTemplate.execute(status ->
+        {
+            jdbcTemplate.update("update xy_payment set status='CLOSED' where payment_no=? and status='PENDING'", paymentNo);
+            jdbcTemplate.update(
+                    "update xy_benefit_booking set status='CLOSED',seat_lock=null,member_lock=null,payment_payload=null "
+                            + "where booking_id=? and status='PENDING_PAYMENT'",
+                    bookingId);
+            return null;
+        });
     }
 
     private String displayEventStatus(String status, boolean beforeDeadline)
@@ -697,5 +859,26 @@ public class XyBenefitEventService
         if (value instanceof java.sql.Time) return ((java.sql.Time) value).toLocalTime();
         String text = string(value);
         return LocalTime.parse(text.length() >= 5 ? text.substring(0, 5) : text);
+    }
+
+    private static final class RefundTask
+    {
+        private final long bookingId;
+        private final String refundNo;
+        private final String transactionId;
+        private final int amountFen;
+        private final String channel;
+        private final String reason;
+
+        private RefundTask(long bookingId, String refundNo, String transactionId, int amountFen,
+                String channel, String reason)
+        {
+            this.bookingId = bookingId;
+            this.refundNo = refundNo;
+            this.transactionId = transactionId;
+            this.amountFen = amountFen;
+            this.channel = channel;
+            this.reason = reason;
+        }
     }
 }
