@@ -239,9 +239,9 @@ public class XyBenefitEventService
             Map<String, Object> current = existing.get(0);
             if ("BOOKED".equals(string(current.get("status"))))
                 throw new ServiceException("你已报名本场福利钓专场，每人每场只能报名一个座位");
-            Timestamp expires = (Timestamp) current.get("expires_time");
+            LocalDateTime expires = asDateTime(current.get("expires_time"));
             if ("PENDING_PAYMENT".equals(string(current.get("status"))) && expires != null
-                    && expires.toLocalDateTime().isAfter(now())
+                    && expires.isAfter(now())
                     && ((Number) current.get("seat_no")).intValue() == seatNo
                     && !StringUtils.isEmpty(string(current.get("payment_payload"))))
             {
@@ -252,7 +252,7 @@ public class XyBenefitEventService
         }
 
         String bookingNo = nextNo("FB");
-        Timestamp expiresTime = Timestamp.valueOf(now().plusMinutes(HOLD_MINUTES));
+        LocalDateTime expiresTime = now().plusMinutes(HOLD_MINUTES);
         try
         {
             jdbcTemplate.update(
@@ -286,7 +286,7 @@ public class XyBenefitEventService
         else
         {
             Map<String, Object> payload = payService.jsapi(paymentNo, string(member.get("openid")), totalFen,
-                    "福利钓专场 " + eventDate, expiresTime.toLocalDateTime());
+                    "福利钓专场 " + eventDate, expiresTime);
             result.putAll(payload);
             try
             {
@@ -305,7 +305,7 @@ public class XyBenefitEventService
     }
 
     private Map<String, Object> paymentPayload(String json, String bookingNo, Long eventId, int seatNo,
-            Timestamp expiresTime)
+            LocalDateTime expiresTime)
     {
         try
         {
@@ -361,8 +361,8 @@ public class XyBenefitEventService
         String eventStatus = string(booking.get("event_status"));
         if (!("OPEN".equals(eventStatus) || "CONFIRMED".equals(eventStatus)))
             throw new ServiceException("本场福利钓专场已无法继续支付");
-        Timestamp expiresTime = (Timestamp) booking.get("expires_time");
-        if (expiresTime == null || !expiresTime.toLocalDateTime().isAfter(now()))
+        LocalDateTime expiresTime = asDateTime(booking.get("expires_time"));
+        if (expiresTime == null || !expiresTime.isAfter(now()))
             throw new ServiceException("占座时间已超过5分钟，请刷新后重新选座");
         String payload = string(booking.get("payment_payload"));
         if (StringUtils.isEmpty(payload)) throw new ServiceException("待支付信息已失效，请刷新后重试");
@@ -917,14 +917,13 @@ public class XyBenefitEventService
 
     private long paymentRemainingSeconds(Map<String, Object> booking)
     {
-        Object expiresValue = booking.get("expiresTime");
-        return expiresValue instanceof Timestamp ? remainingSeconds((Timestamp) expiresValue) : 0L;
+        return remainingSeconds(asDateTime(booking.get("expiresTime")));
     }
 
-    private long remainingSeconds(Timestamp expiresTime)
+    private long remainingSeconds(LocalDateTime expiresTime)
     {
         if (expiresTime == null) return 0L;
-        return Math.max(0L, Duration.between(now(), expiresTime.toLocalDateTime()).getSeconds());
+        return Math.max(0L, Duration.between(now(), expiresTime).getSeconds());
     }
 
     private boolean isLocked(Object value)
@@ -976,6 +975,17 @@ public class XyBenefitEventService
         if (value instanceof java.sql.Time) return ((java.sql.Time) value).toLocalTime();
         String text = string(value);
         return LocalTime.parse(text.length() >= 5 ? text.substring(0, 5) : text);
+    }
+    private LocalDateTime asDateTime(Object value)
+    {
+        if (value == null) return null;
+        if (value instanceof LocalDateTime) return (LocalDateTime) value;
+        if (value instanceof Timestamp) return ((Timestamp) value).toLocalDateTime();
+        try
+        {
+            return LocalDateTime.parse(string(value).trim().replace(' ', 'T'));
+        }
+        catch (Exception ex) { throw new ServiceException("时间格式异常，请刷新后重试"); }
     }
 
     private static final class RefundTask
