@@ -363,4 +363,76 @@ class XyBusinessFlowIntegrationTest
         assertEquals("PROCESSING", jdbc.queryForObject(
                 "select status from xy_benefit_refund where booking_id=?", String.class, lateBookingId));
     }
+
+    @Test
+    void benefitPendingPaymentCanBeContinuedWithoutCreatingAnotherPayment()
+    {
+        String suffix = UUID.randomUUID().toString().replace("-", "");
+        Map<String, Object> login = service.loginByOpenId("benefit_retry_" + suffix, null);
+        memberToken = String.valueOf(login.get("memberToken"));
+        Long memberId = service.requireMember(memberToken);
+        jdbc.update("insert into xy_member(openid,nickname,invite_code) values(?,?,?)",
+                "benefit_other_" + suffix, "其他测试用户", suffix.substring(20, 32).toUpperCase());
+        Long otherMemberId = jdbc.queryForObject("select last_insert_id()", Long.class);
+        jdbc.update("insert into xy_store(store_name,address,phone,business_hours) values(?,?,?,?)",
+                "续付测试门店" + suffix.substring(0, 6), "测试地址", "13800000000", "10:00-22:15");
+        Long storeId = jdbc.queryForObject("select last_insert_id()", Long.class);
+
+        Map<String, Object> eventInput = new HashMap<>();
+        eventInput.put("storeId", storeId);
+        eventInput.put("eventDate", LocalDate.now().plusDays(1).toString());
+        eventInput.put("announcement", "续付集成测试公告：测试奖品一份，满足条件正常开场。");
+        eventInput.put("status", "OPEN");
+        eventInput.put("feeAmount", new BigDecimal("99.00"));
+        Map<String, Object> event = benefitEventService.saveEvent(null, eventInput, "integration-test");
+        Long eventId = ((Number) event.get("eventId")).longValue();
+
+        String bookingNo = "RETRYB" + suffix.substring(0, 20);
+        String paymentNo = "RETRYP" + suffix.substring(0, 20);
+        String paymentPayload = "{\"appId\":\"wx-test\",\"timeStamp\":\"123456\","
+                + "\"nonceStr\":\"nonce\",\"package\":\"prepay_id=retry-test\","
+                + "\"signType\":\"RSA\",\"paySign\":\"signature\"}";
+        jdbc.update("insert into xy_benefit_booking(booking_no,event_id,member_id,seat_no,announcement_version,"
+                        + "announcement_snapshot,announcement_confirmed_time,payment_payload,expires_time) "
+                        + "values(?,?,?,?,?,?,now(),?,date_add(now(),interval 5 minute))",
+                bookingNo, eventId, memberId, 8, event.get("announcementVersion"),
+                eventInput.get("announcement"), paymentPayload);
+        Long bookingId = jdbc.queryForObject("select last_insert_id()", Long.class);
+        jdbc.update("insert into xy_payment(payment_no,member_id,business_type,business_id,amount,channel,status) "
+                        + "values(?,?, 'BENEFIT_EVENT',?,99.00,'WECHAT','PENDING')",
+                paymentNo, memberId, bookingId);
+
+        Map<String, Object> continued = benefitEventService.continueBookingPayment(memberId, bookingNo);
+        assertEquals(bookingNo, continued.get("bookingNo"));
+        assertEquals("prepay_id=retry-test", continued.get("package"));
+        assertTrue(((Number) continued.get("remainingSeconds")).longValue() > 0);
+        assertEquals(1, jdbc.queryForObject(
+                "select count(1) from xy_payment where business_type='BENEFIT_EVENT' and business_id=?",
+                Integer.class, bookingId));
+
+        Map<String, Object> publicEvent = benefitEventService.publicEvent(eventId, memberId);
+        assertEquals(true, publicEvent.get("myCanContinuePayment"));
+        assertTrue(((Number) publicEvent.get("myPaymentRemainingSeconds")).longValue() > 0);
+        Map<String, Object> bookingListRow = benefitEventService.memberBookings(memberId).stream()
+                .filter(row -> bookingNo.equals(row.get("bookingNo"))).findFirst().orElseThrow();
+        assertEquals(eventId, ((Number) bookingListRow.get("eventId")).longValue());
+        assertEquals(true, bookingListRow.get("canContinuePayment"));
+        assertTrue(((Number) bookingListRow.get("paymentRemainingSeconds")).longValue() > 0);
+
+        assertThrows(ServiceException.class,
+                () -> benefitEventService.continueBookingPayment(otherMemberId, bookingNo));
+        jdbc.update("update xy_benefit_booking set expires_time=date_sub(now(),interval 1 second) where booking_id=?",
+                bookingId);
+        assertThrows(ServiceException.class,
+                () -> benefitEventService.continueBookingPayment(memberId, bookingNo));
+
+        jdbc.update("update xy_benefit_booking set status='BOOKED',expires_time=null,payment_payload=null,booked_time=now() "
+                + "where booking_id=?", bookingId);
+        jdbc.update("update xy_payment set status='SUCCESS',transaction_id=?,paid_time=now() where payment_no=?",
+                "WX-RETRY-" + suffix.substring(0, 12), paymentNo);
+        Map<String, Object> paid = benefitEventService.continueBookingPayment(memberId, bookingNo);
+        assertEquals(true, paid.get("paid"));
+        assertEquals(bookingNo, paid.get("bookingNo"));
+        assertEquals(0L, ((Number) paid.get("remainingSeconds")).longValue());
+    }
 }

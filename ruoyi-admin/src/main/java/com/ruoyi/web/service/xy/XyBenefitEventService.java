@@ -3,6 +3,7 @@ package com.ruoyi.web.service.xy;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -146,8 +147,11 @@ public class XyBenefitEventService
         if (memberId != null)
         {
             List<Map<String, Object>> mine = jdbcTemplate.queryForList(
-                    "select booking_no as bookingNo,seat_no as seatNo,status from xy_benefit_booking "
-                            + "where event_id=? and member_id=? order by booking_id desc limit 1",
+                    "select b.booking_no as bookingNo,b.seat_no as seatNo,b.status,b.seat_lock as seatLock,"
+                            + "b.member_lock as memberLock,b.expires_time as expiresTime,"
+                            + "b.payment_payload as paymentPayload,p.status as paymentStatus from xy_benefit_booking b "
+                            + "left join xy_payment p on p.business_type='BENEFIT_EVENT' and p.business_id=b.booking_id "
+                            + "where b.event_id=? and b.member_id=? order by b.booking_id desc limit 1",
                     event.get("eventId"), memberId);
             if (!mine.isEmpty())
             {
@@ -155,6 +159,8 @@ public class XyBenefitEventService
                 event.put("myBookingNo", booking.get("bookingNo"));
                 event.put("mySeatNo", booking.get("seatNo"));
                 event.put("myBookingStatus", displayBookingStatus(String.valueOf(booking.get("status")), status));
+                event.put("myPaymentRemainingSeconds", paymentRemainingSeconds(booking));
+                event.put("myCanContinuePayment", canContinuePayment(booking, status));
             }
         }
     }
@@ -163,18 +169,29 @@ public class XyBenefitEventService
     {
         expirePendingBookings();
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
-                "select b.booking_no as bookingNo,b.seat_no as seatNo,b.status,e.event_date as eventDate,"
+                "select b.booking_no as bookingNo,b.event_id as eventId,b.seat_no as seatNo,b.status,"
+                        + "b.seat_lock as seatLock,b.member_lock as memberLock,b.expires_time as expiresTime,"
+                        + "b.payment_payload as paymentPayload,p.status as paymentStatus,"
+                        + "e.event_date as eventDate,"
                         + "date_format(e.start_time,'%H:%i') as startTime,date_format(e.end_time,'%H:%i') as endTime,"
                         + "e.fee_amount as feeAmount,e.status as eventStatus,b.announcement_snapshot as announcement,"
                         + "b.announcement_version as announcementVersion,st.store_name as storeName,st.address,st.phone "
                         + "from xy_benefit_booking b join xy_benefit_event e on e.event_id=b.event_id "
-                        + "join xy_store st on st.store_id=e.store_id where b.member_id=? "
+                        + "join xy_store st on st.store_id=e.store_id "
+                        + "left join xy_payment p on p.business_type='BENEFIT_EVENT' and p.business_id=b.booking_id "
+                        + "where b.member_id=? "
                         + "order by e.event_date desc,b.booking_id desc",
                 memberId);
         for (Map<String, Object> row : rows)
         {
             row.put("displayStatus", displayBookingStatus(String.valueOf(row.get("status")),
                     String.valueOf(row.get("eventStatus"))));
+            row.put("paymentRemainingSeconds", paymentRemainingSeconds(row));
+            row.put("canContinuePayment", canContinuePayment(row, string(row.get("eventStatus"))));
+            row.remove("paymentPayload");
+            row.remove("paymentStatus");
+            row.remove("seatLock");
+            row.remove("memberLock");
         }
         return rows;
     }
@@ -228,7 +245,8 @@ public class XyBenefitEventService
                     && ((Number) current.get("seat_no")).intValue() == seatNo
                     && !StringUtils.isEmpty(string(current.get("payment_payload"))))
             {
-                return paymentPayload(string(current.get("payment_payload")), string(current.get("booking_no")), eventId, seatNo);
+                return paymentPayload(string(current.get("payment_payload")), string(current.get("booking_no")),
+                        eventId, seatNo, expires);
             }
             throw new ServiceException("本场已有一个待确认座位，请在5分钟后刷新重选");
         }
@@ -282,10 +300,12 @@ public class XyBenefitEventService
         result.put("seatNo", seatNo);
         result.put("feeAmount", feeAmount);
         result.put("holdMinutes", HOLD_MINUTES);
+        result.put("remainingSeconds", remainingSeconds(expiresTime));
         return result;
     }
 
-    private Map<String, Object> paymentPayload(String json, String bookingNo, Long eventId, int seatNo)
+    private Map<String, Object> paymentPayload(String json, String bookingNo, Long eventId, int seatNo,
+            Timestamp expiresTime)
     {
         try
         {
@@ -294,9 +314,59 @@ public class XyBenefitEventService
             result.put("eventId", eventId);
             result.put("seatNo", seatNo);
             result.put("holdMinutes", HOLD_MINUTES);
+            result.put("remainingSeconds", remainingSeconds(expiresTime));
             return result;
         }
         catch (Exception ex) { throw new ServiceException("待支付信息已失效，请稍后刷新重试"); }
+    }
+
+    /**
+     * 继续已创建的福利钓支付。只返回原占座记录保存的支付参数，不创建新报名或新支付流水。
+     */
+    @Transactional
+    public Map<String, Object> continueBookingPayment(Long memberId, String bookingNo)
+    {
+        if (StringUtils.isEmpty(bookingNo)) throw new ServiceException("报名编号不能为空");
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+                "select b.booking_id,b.booking_no,b.event_id,b.seat_no,b.status,b.seat_lock,b.member_lock,"
+                        + "b.expires_time,b.payment_payload,"
+                        + "e.fee_amount,e.status as event_status,p.status as payment_status "
+                        + "from xy_benefit_booking b join xy_benefit_event e on e.event_id=b.event_id "
+                        + "join xy_payment p on p.business_type='BENEFIT_EVENT' and p.business_id=b.booking_id "
+                        + "where b.booking_no=? and b.member_id=? for update",
+                bookingNo, memberId);
+        if (rows.isEmpty()) throw new ServiceException("报名记录不存在");
+        Map<String, Object> booking = rows.get(0);
+        String bookingStatus = string(booking.get("status"));
+        String paymentStatus = string(booking.get("payment_status"));
+        Long eventId = ((Number) booking.get("event_id")).longValue();
+        int seatNo = ((Number) booking.get("seat_no")).intValue();
+
+        if ("BOOKED".equals(bookingStatus))
+        {
+            if (!"SUCCESS".equals(paymentStatus)) throw new ServiceException("报名支付状态异常，请联系商家");
+            Map<String, Object> result = new LinkedHashMap<>();
+            result.put("paid", true);
+            result.put("bookingNo", bookingNo);
+            result.put("eventId", eventId);
+            result.put("seatNo", seatNo);
+            result.put("feeAmount", booking.get("fee_amount"));
+            result.put("remainingSeconds", 0);
+            return result;
+        }
+        if (!"PENDING_PAYMENT".equals(bookingStatus) || !"PENDING".equals(paymentStatus))
+            throw new ServiceException("当前报名已无法继续支付");
+        if (!isLocked(booking.get("seat_lock")) || !isLocked(booking.get("member_lock")))
+            throw new ServiceException("当前座位已释放，请刷新后重新选座");
+        String eventStatus = string(booking.get("event_status"));
+        if (!("OPEN".equals(eventStatus) || "CONFIRMED".equals(eventStatus)))
+            throw new ServiceException("本场福利钓专场已无法继续支付");
+        Timestamp expiresTime = (Timestamp) booking.get("expires_time");
+        if (expiresTime == null || !expiresTime.toLocalDateTime().isAfter(now()))
+            throw new ServiceException("占座时间已超过5分钟，请刷新后重新选座");
+        String payload = string(booking.get("payment_payload"));
+        if (StringUtils.isEmpty(payload)) throw new ServiceException("待支付信息已失效，请刷新后重试");
+        return paymentPayload(payload, bookingNo, eventId, seatNo, expiresTime);
     }
 
     @Transactional
@@ -832,6 +902,34 @@ public class XyBenefitEventService
         if ("BOOKED".equals(bookingStatus)) return "已报名";
         if ("PENDING_PAYMENT".equals(bookingStatus)) return "报名确认中";
         return "报名已关闭";
+    }
+
+    private boolean canContinuePayment(Map<String, Object> booking, String eventStatus)
+    {
+        return "PENDING_PAYMENT".equals(string(booking.get("status")))
+                && "PENDING".equals(string(booking.get("paymentStatus")))
+                && isLocked(booking.get("seatLock"))
+                && isLocked(booking.get("memberLock"))
+                && ("OPEN".equals(eventStatus) || "CONFIRMED".equals(eventStatus))
+                && !StringUtils.isEmpty(string(booking.get("paymentPayload")))
+                && paymentRemainingSeconds(booking) > 0;
+    }
+
+    private long paymentRemainingSeconds(Map<String, Object> booking)
+    {
+        Object expiresValue = booking.get("expiresTime");
+        return expiresValue instanceof Timestamp ? remainingSeconds((Timestamp) expiresValue) : 0L;
+    }
+
+    private long remainingSeconds(Timestamp expiresTime)
+    {
+        if (expiresTime == null) return 0L;
+        return Math.max(0L, Duration.between(now(), expiresTime.toLocalDateTime()).getSeconds());
+    }
+
+    private boolean isLocked(Object value)
+    {
+        return value instanceof Number && ((Number) value).intValue() == 1;
     }
 
     private LocalDate today() { return LocalDate.now(CHINA_ZONE); }

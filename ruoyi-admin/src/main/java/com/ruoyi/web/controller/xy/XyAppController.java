@@ -115,6 +115,14 @@ public class XyAppController
     }
 
     @Anonymous
+    @PostMapping("/benefit-bookings/{bookingNo}/payment")
+    public AjaxResult continueBenefitBookingPayment(@PathVariable String bookingNo,
+            @RequestHeader(value = "X-App-Token", required = false) String token)
+    {
+        return AjaxResult.success(benefitEventService.continueBookingPayment(service.requireMember(token), bookingNo));
+    }
+
+    @Anonymous
     @GetMapping("/payment-settings")
     public AjaxResult paymentSettings()
     {
