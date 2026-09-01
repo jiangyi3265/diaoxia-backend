@@ -41,7 +41,7 @@ public class TokenService
     @Value("${token.secret}")
     private String secret;
 
-    // 令牌有效期（默认30分钟）
+    // 令牌有效期（分钟，小于等于0表示不自动过期）
     @Value("${token.expireTime}")
     private int expireTime;
 
@@ -50,6 +50,9 @@ public class TokenService
     protected static final long MILLIS_MINUTE = 60 * MILLIS_SECOND;
 
     private static final Long MILLIS_MINUTE_TWENTY = 20 * 60 * 1000L;
+
+    /** 永不过期会话的明确标记，便于将已有的限时会话平滑迁移为永久会话。 */
+    private static final Long NEVER_EXPIRE = Long.MAX_VALUE;
 
     @Autowired
     private RedisCache redisCache;
@@ -132,9 +135,24 @@ public class TokenService
      */
     public void verifyToken(LoginUser loginUser)
     {
-        long expireTime = loginUser.getExpireTime();
+        if (expireTime <= 0)
+        {
+            // 部署前创建的会话仍带有Redis TTL，首次请求时改写为无TTL会话。
+            if (!NEVER_EXPIRE.equals(loginUser.getExpireTime()))
+            {
+                refreshToken(loginUser);
+            }
+            return;
+        }
+        // 配置恢复为有限期时，也将现有永久会话重新加上TTL。
+        if (NEVER_EXPIRE.equals(loginUser.getExpireTime()))
+        {
+            refreshToken(loginUser);
+            return;
+        }
+        long userExpireTime = loginUser.getExpireTime();
         long currentTime = System.currentTimeMillis();
-        if (expireTime - currentTime <= MILLIS_MINUTE_TWENTY)
+        if (userExpireTime - currentTime <= MILLIS_MINUTE_TWENTY)
         {
             refreshToken(loginUser);
         }
@@ -148,9 +166,15 @@ public class TokenService
     public void refreshToken(LoginUser loginUser)
     {
         loginUser.setLoginTime(System.currentTimeMillis());
-        loginUser.setExpireTime(loginUser.getLoginTime() + expireTime * MILLIS_MINUTE);
         // 根据uuid将loginUser缓存
         String userKey = getTokenKey(loginUser.getToken());
+        if (expireTime <= 0)
+        {
+            loginUser.setExpireTime(NEVER_EXPIRE);
+            redisCache.setCacheObject(userKey, loginUser);
+            return;
+        }
+        loginUser.setExpireTime(loginUser.getLoginTime() + expireTime * MILLIS_MINUTE);
         redisCache.setCacheObject(userKey, loginUser, expireTime, TimeUnit.MINUTES);
     }
 

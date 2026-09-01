@@ -94,8 +94,8 @@ token:
   header: Authorization
   # 令牌密钥
   secret: ${TOKEN_SECRET}
-  # 令牌有效期（默认30分钟）
-  expireTime: 30
+  # 令牌有效期（分钟）；0表示不自动过期，仍可手动退出或由管理员强制下线
+  expireTime: ${TOKEN_EXPIRE_MINUTES:30}
 
 # 钓虾小程序。真实密钥只能通过部署环境变量注入，严禁填写到此文件。
 xy:
