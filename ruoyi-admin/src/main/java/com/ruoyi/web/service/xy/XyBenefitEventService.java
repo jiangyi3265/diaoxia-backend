@@ -91,7 +91,8 @@ public class XyBenefitEventService
                         + "e.announcement,e.announcement_version as announcementVersion,e.status,st.store_name as storeName,"
                         + "(select count(1) from xy_benefit_booking b where b.event_id=e.event_id and b.seat_lock=1) as bookedCount "
                         + "from xy_benefit_event e join xy_store st on st.store_id=e.store_id and st.status='0' "
-                        + "where e.event_date between ? and ? and e.status<>'DRAFT' order by e.event_date,e.event_id",
+                        + "where e.event_date between ? and ? and e.status not in('DRAFT','DELETED') "
+                        + "order by e.event_date,e.event_id",
                 today, today.plusDays(6));
         for (Map<String, Object> event : events)
         {
@@ -109,7 +110,8 @@ public class XyBenefitEventService
                         + "date_format(e.signup_deadline,'%H:%i') as signupDeadline,e.fee_amount as feeAmount,"
                         + "e.announcement,e.announcement_version as announcementVersion,e.status,e.cancel_reason as cancelReason,"
                         + "st.store_name as storeName,st.address,st.phone from xy_benefit_event e "
-                        + "join xy_store st on st.store_id=e.store_id where e.event_id=? and e.status<>'DRAFT'",
+                        + "join xy_store st on st.store_id=e.store_id "
+                        + "where e.event_id=? and e.status not in('DRAFT','DELETED')",
                 eventId);
         if (rows.isEmpty()) throw new ServiceException("福利钓专场不存在或尚未开放");
         Map<String, Object> event = rows.get(0);
@@ -464,7 +466,7 @@ public class XyBenefitEventService
                         + "from xy_benefit_event e join xy_store st on st.store_id=e.store_id "
                         + "left join xy_benefit_booking b on b.event_id=e.event_id "
                         + "left join xy_benefit_refund r on r.booking_id=b.booking_id "
-                        + "where e.event_date>=date_sub(curdate(),interval 7 day) "
+                        + "where e.event_date>=date_sub(curdate(),interval 7 day) and e.status<>'DELETED' "
                         + "group by e.event_id order by e.event_date desc,e.event_id desc");
         for (Map<String, Object> event : events)
             event.put("remainingCount", Math.max(0,
@@ -531,8 +533,8 @@ public class XyBenefitEventService
             if (rows.isEmpty()) throw new ServiceException("福利钓专场不存在");
             Map<String, Object> current = rows.get(0);
             String oldStatus = string(current.get("status"));
-            if ("CANCELED".equals(oldStatus) || "FINISHED".equals(oldStatus))
-                throw new ServiceException("已取消或已结束的场次不能修改");
+            if ("CANCELED".equals(oldStatus) || "FINISHED".equals(oldStatus) || "DELETED".equals(oldStatus))
+                throw new ServiceException("已取消、已结束或已删除的场次不能修改");
             boolean announcementChanged = !Objects.equals(announcement, string(current.get("announcement")));
             boolean feeChanged = feeAmount.compareTo(feeAmount(current.get("fee_amount"))) != 0;
             boolean termsChanged = announcementChanged || feeChanged;
@@ -554,6 +556,54 @@ public class XyBenefitEventService
             catch (DuplicateKeyException ex) { throw new ServiceException("该门店当天已经创建福利钓专场"); }
         }
         return adminEvent(eventId);
+    }
+
+    /**
+     * 后台删除福利钓场次。无报名历史时删除空场次以释放同门店同日期唯一键；
+     * 有历史时仅标记隐藏，报名、支付、资金处理和通知记录全部保留。
+     * 只有从未开放的草稿或已完成取消流程的场次允许删除。
+     */
+    @Transactional
+    public Map<String, Object> deleteEvent(Long eventId, String operator)
+    {
+        List<Map<String, Object>> events = jdbcTemplate.queryForList(
+                "select event_id,status from xy_benefit_event where event_id=? for update", eventId);
+        if (events.isEmpty() || "DELETED".equals(string(events.get(0).get("status"))))
+            throw new ServiceException("福利钓专场不存在或已删除");
+        String status = string(events.get(0).get("status"));
+        if (!("DRAFT".equals(status) || "CANCELED".equals(status)))
+            throw new ServiceException("只有草稿或已取消的场次可以删除");
+
+        Integer unsafeRecords = jdbcTemplate.queryForObject(
+                "select count(1) from xy_benefit_booking b "
+                        + "left join xy_payment p on p.business_type='BENEFIT_EVENT' and p.business_id=b.booking_id "
+                        + "left join xy_benefit_refund r on r.booking_id=b.booking_id where b.event_id=? and ("
+                        + "b.status<>'CLOSED' or b.seat_lock is not null or b.member_lock is not null "
+                        + "or p.payment_id is null or not ((p.status='CLOSED' and r.benefit_refund_id is null) "
+                        + "or (p.status='REFUNDED' and r.benefit_refund_id is not null and r.status='SUCCESS')))",
+                Integer.class, eventId);
+        if (unsafeRecords != null && unsafeRecords > 0)
+            throw new ServiceException("场次仍有占座、报名、支付或资金记录未安全结束，不能删除");
+
+        Integer bookingCount = jdbcTemplate.queryForObject(
+                "select count(1) from xy_benefit_booking where event_id=?", Integer.class, eventId);
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("eventId", eventId);
+        if (bookingCount == null || bookingCount == 0)
+        {
+            int deleted = jdbcTemplate.update(
+                    "delete from xy_benefit_event where event_id=? and status=?", eventId, status);
+            if (deleted != 1) throw new ServiceException("场次状态已变化，请刷新后重试");
+            result.put("archived", false);
+            return result;
+        }
+
+        int updated = jdbcTemplate.update(
+                "update xy_benefit_event set status='DELETED',update_by=? where event_id=? and status=?",
+                operator, eventId, status);
+        if (updated != 1) throw new ServiceException("场次状态已变化，请刷新后重试");
+        result.put("archived", true);
+        return result;
     }
 
     public Map<String, Object> confirmEvent(Long eventId, String operator)
@@ -815,9 +865,17 @@ public class XyBenefitEventService
         List<Long> startEvents = jdbcTemplate.queryForList(
                 "select event_id from xy_benefit_event where status='CONFIRMED' and event_date>=curdate()", Long.class);
         for (Long eventId : startEvents) dispatchEventNotices(eventId, "START");
-        List<Long> canceledEvents = jdbcTemplate.queryForList(
-                "select event_id from xy_benefit_event where status='CANCELED' and event_date>=date_sub(curdate(),interval 1 day)", Long.class);
+        List<Long> canceledEvents = dueCancellationNoticeEventIds();
         for (Long eventId : canceledEvents) dispatchEventNotices(eventId, "CANCEL");
+    }
+
+    /** 已删除的草稿不是取消场次，只重试确实执行过取消流程的隐藏场次。 */
+    List<Long> dueCancellationNoticeEventIds()
+    {
+        return jdbcTemplate.queryForList(
+                "select event_id from xy_benefit_event where (status='CANCELED' "
+                        + "or (status='DELETED' and canceled_time is not null)) "
+                        + "and event_date>=date_sub(curdate(),interval 1 day)", Long.class);
     }
 
     private void expirePendingBookings()
@@ -897,7 +955,7 @@ public class XyBenefitEventService
 
     private String displayBookingStatus(String bookingStatus, String eventStatus)
     {
-        if ("CANCELED".equals(eventStatus)) return "专场已取消";
+        if ("CANCELED".equals(eventStatus) || "DELETED".equals(eventStatus)) return "专场已取消";
         if ("FINISHED".equals(eventStatus)) return "专场已结束";
         if ("BOOKED".equals(bookingStatus)) return "已报名";
         if ("PENDING_PAYMENT".equals(bookingStatus)) return "报名确认中";

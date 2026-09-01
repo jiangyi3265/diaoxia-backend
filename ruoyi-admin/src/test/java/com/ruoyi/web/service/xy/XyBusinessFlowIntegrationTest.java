@@ -438,4 +438,136 @@ class XyBusinessFlowIntegrationTest
         assertEquals(bookingNo, paid.get("bookingNo"));
         assertEquals(0L, ((Number) paid.get("remainingSeconds")).longValue());
     }
+
+    @Test
+    void benefitEventDeleteUsesHybridStrategyAndRequiresSafeTerminalRecords()
+    {
+        String suffix = UUID.randomUUID().toString().replace("-", "");
+        Map<String, Object> login = service.loginByOpenId("benefit_delete_" + suffix, null);
+        memberToken = String.valueOf(login.get("memberToken"));
+        Long memberId = service.requireMember(memberToken);
+        jdbc.update("insert into xy_store(store_name,address,phone,business_hours) values(?,?,?,?)",
+                "删除测试门店" + suffix.substring(0, 6), "测试地址", "13800000000", "10:00-22:15");
+        Long storeId = jdbc.queryForObject("select last_insert_id()", Long.class);
+
+        Map<String, Object> eventInput = new HashMap<>();
+        eventInput.put("storeId", storeId);
+        eventInput.put("eventDate", LocalDate.now().plusDays(5).toString());
+        eventInput.put("announcement", "删除集成测试公告：奖品一份，达到公告条件后正常开场。");
+        eventInput.put("status", "DRAFT");
+        eventInput.put("feeAmount", new BigDecimal("99.00"));
+        Map<String, Object> draft = benefitEventService.saveEvent(null, eventInput, "integration-test");
+        Long draftId = ((Number) draft.get("eventId")).longValue();
+        Map<String, Object> deletedDraft = benefitEventService.deleteEvent(draftId, "integration-test");
+        assertEquals(false, deletedDraft.get("archived"));
+        assertEquals(0, jdbc.queryForObject(
+                "select count(1) from xy_benefit_event where event_id=?", Integer.class, draftId));
+        assertTrue(benefitEventService.adminEvents().stream()
+                .noneMatch(row -> draftId.equals(((Number) row.get("eventId")).longValue())));
+        assertThrows(ServiceException.class, () -> benefitEventService.publicEvent(draftId, memberId));
+        assertThrows(ServiceException.class,
+                () -> benefitEventService.deleteEvent(draftId, "integration-test"));
+        Map<String, Object> recreatedDraft = benefitEventService.saveEvent(null, eventInput, "integration-test");
+        Long recreatedDraftId = ((Number) recreatedDraft.get("eventId")).longValue();
+        assertTrue(!draftId.equals(recreatedDraftId));
+        String draftBookingNo = "DRAFTB" + suffix.substring(0, 20);
+        jdbc.update("insert into xy_benefit_booking(booking_no,event_id,member_id,seat_no,status,seat_lock,member_lock,"
+                        + "announcement_version,announcement_snapshot,announcement_confirmed_time,close_reason) "
+                        + "values(?,?,?,?, 'CLOSED',null,null,?,?,now(),'草稿删除测试')",
+                draftBookingNo, recreatedDraftId, memberId, 2, recreatedDraft.get("announcementVersion"),
+                eventInput.get("announcement"));
+        Long draftBookingId = jdbc.queryForObject("select last_insert_id()", Long.class);
+        jdbc.update("insert into xy_payment(payment_no,member_id,business_type,business_id,amount,channel,status) "
+                        + "values(?,?, 'BENEFIT_EVENT',?,99.00,'DEMO','CLOSED')",
+                "DRAFTP" + suffix.substring(0, 20), memberId, draftBookingId);
+        Map<String, Object> archivedDraft = benefitEventService.deleteEvent(recreatedDraftId, "integration-test");
+        assertEquals(true, archivedDraft.get("archived"));
+        assertTrue(benefitEventService.dueCancellationNoticeEventIds().stream()
+                .noneMatch(recreatedDraftId::equals));
+
+        eventInput.put("eventDate", LocalDate.now().plusDays(6).toString());
+        eventInput.put("status", "OPEN");
+        Map<String, Object> event = benefitEventService.saveEvent(null, eventInput, "integration-test");
+        Long eventId = ((Number) event.get("eventId")).longValue();
+        assertThrows(ServiceException.class,
+                () -> benefitEventService.deleteEvent(eventId, "integration-test"));
+        benefitEventService.cancelEvent(eventId, "删除集成测试取消", "integration-test");
+
+        String bookingNo = "DELETEB" + suffix.substring(0, 20);
+        jdbc.update("insert into xy_benefit_booking(booking_no,event_id,member_id,seat_no,status,seat_lock,member_lock,"
+                        + "announcement_version,announcement_snapshot,announcement_confirmed_time,close_reason) "
+                        + "values(?,?,?,?, 'CLOSED',null,null,?,?,now(),'删除集成测试')",
+                bookingNo, eventId, memberId, 1, event.get("announcementVersion"), eventInput.get("announcement"));
+        Long bookingId = jdbc.queryForObject("select last_insert_id()", Long.class);
+        String paymentNo = "DELETEP" + suffix.substring(0, 20);
+        jdbc.update("insert into xy_payment(payment_no,member_id,business_type,business_id,amount,channel,status) "
+                        + "values(?,?, 'BENEFIT_EVENT',?,99.00,'DEMO','REFUNDED')",
+                paymentNo, memberId, bookingId);
+        jdbc.update("insert into xy_benefit_refund(booking_id,refund_no,amount,reason,status,create_by) "
+                        + "values(?,?,99.00,'删除集成测试','SUCCESS','integration-test')",
+                bookingId, "DELETER" + suffix.substring(0, 20));
+
+        for (String activeBookingStatus : List.of("PENDING_PAYMENT", "BOOKED", "REFUNDING", "UNKNOWN"))
+        {
+            jdbc.update("update xy_benefit_booking set status=?,seat_lock=null,member_lock=null where booking_id=?",
+                    activeBookingStatus, bookingId);
+            assertThrows(ServiceException.class,
+                    () -> benefitEventService.deleteEvent(eventId, "integration-test"));
+        }
+        jdbc.update("update xy_benefit_booking set status='CLOSED',seat_lock=1,member_lock=null where booking_id=?",
+                bookingId);
+        assertThrows(ServiceException.class,
+                () -> benefitEventService.deleteEvent(eventId, "integration-test"));
+        jdbc.update("update xy_benefit_booking set seat_lock=null,member_lock=1 where booking_id=?", bookingId);
+        assertThrows(ServiceException.class,
+                () -> benefitEventService.deleteEvent(eventId, "integration-test"));
+        jdbc.update("update xy_benefit_booking set member_lock=null where booking_id=?", bookingId);
+
+        for (String activePaymentStatus : List.of("PENDING", "SUCCESS", "REFUNDING", "UNKNOWN"))
+        {
+            jdbc.update("update xy_payment set status=? where payment_no=?", activePaymentStatus, paymentNo);
+            assertThrows(ServiceException.class,
+                    () -> benefitEventService.deleteEvent(eventId, "integration-test"));
+        }
+        jdbc.update("update xy_payment set status='REFUNDED' where payment_no=?", paymentNo);
+        for (String unsafeRefundStatus : List.of("PROCESSING", "FAILED", "UNKNOWN"))
+        {
+            jdbc.update("update xy_benefit_refund set status=? where booking_id=?", unsafeRefundStatus, bookingId);
+            assertThrows(ServiceException.class,
+                    () -> benefitEventService.deleteEvent(eventId, "integration-test"));
+        }
+        jdbc.update("update xy_benefit_refund set status='SUCCESS' where booking_id=?", bookingId);
+        jdbc.update("update xy_payment set status='CLOSED' where payment_no=?", paymentNo);
+        assertThrows(ServiceException.class,
+                () -> benefitEventService.deleteEvent(eventId, "integration-test"));
+        jdbc.update("update xy_payment set status='REFUNDED' where payment_no=?", paymentNo);
+        jdbc.update("delete from xy_benefit_refund where booking_id=?", bookingId);
+        assertThrows(ServiceException.class,
+                () -> benefitEventService.deleteEvent(eventId, "integration-test"));
+        jdbc.update("insert into xy_benefit_refund(booking_id,refund_no,amount,reason,status,create_by) "
+                        + "values(?,?,99.00,'删除集成测试','SUCCESS','integration-test')",
+                bookingId, "DELETER2" + suffix.substring(0, 20));
+        assertTrue(benefitEventService.publicEvents(memberId).stream()
+                .anyMatch(row -> eventId.equals(((Number) row.get("eventId")).longValue())));
+
+        Map<String, Object> deletedEvent = benefitEventService.deleteEvent(eventId, "integration-test");
+        assertEquals(true, deletedEvent.get("archived"));
+        assertEquals("DELETED", jdbc.queryForObject(
+                "select status from xy_benefit_event where event_id=?", String.class, eventId));
+        assertTrue(benefitEventService.dueCancellationNoticeEventIds().contains(eventId));
+        assertTrue(benefitEventService.publicEvents(memberId).stream()
+                .noneMatch(row -> eventId.equals(((Number) row.get("eventId")).longValue())));
+        assertTrue(benefitEventService.adminEvents().stream()
+                .noneMatch(row -> eventId.equals(((Number) row.get("eventId")).longValue())));
+        assertThrows(ServiceException.class, () -> benefitEventService.publicEvent(eventId, memberId));
+        assertEquals("专场已取消", benefitEventService.memberBookings(memberId).stream()
+                .filter(row -> bookingNo.equals(row.get("bookingNo")))
+                .findFirst().orElseThrow().get("displayStatus"));
+        assertEquals(1, jdbc.queryForObject(
+                "select count(1) from xy_benefit_booking where booking_id=?", Integer.class, bookingId));
+        assertEquals(1, jdbc.queryForObject(
+                "select count(1) from xy_payment where payment_no=?", Integer.class, paymentNo));
+        assertEquals(1, jdbc.queryForObject(
+                "select count(1) from xy_benefit_refund where booking_id=?", Integer.class, bookingId));
+    }
 }

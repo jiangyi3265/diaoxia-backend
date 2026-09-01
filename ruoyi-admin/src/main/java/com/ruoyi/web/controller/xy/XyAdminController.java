@@ -123,6 +123,13 @@ public class XyAdminController
         return AjaxResult.success(benefitEventService.saveEvent(eventId, body, SecurityUtils.getUsername()));
     }
 
+    @Log(title = "删除福利钓专场", businessType = BusinessType.DELETE)
+    @PreAuthorize("@ss.hasPermi('xy:benefit:edit')")
+    @DeleteMapping("/benefit-events/{eventId}") public AjaxResult deleteBenefitEvent(@PathVariable Long eventId)
+    {
+        return AjaxResult.success(benefitEventService.deleteEvent(eventId, SecurityUtils.getUsername()));
+    }
+
     @Log(title = "确认福利钓开始", businessType = BusinessType.UPDATE)
     @PreAuthorize("@ss.hasPermi('xy:benefit:edit')")
     @PostMapping("/benefit-events/{eventId}/confirm") public AjaxResult confirmBenefitEvent(@PathVariable Long eventId)
