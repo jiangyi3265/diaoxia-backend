@@ -269,6 +269,10 @@ class XyBusinessFlowIntegrationTest
         eventInput.put("eventDate", LocalDate.now().plusDays(1).toString());
         eventInput.put("announcement", "测试奖品：第一名礼品一份。人数不限，商家确认后正常开始。");
         eventInput.put("status", "OPEN");
+        eventInput.put("feeAmount", new BigDecimal("0.00"));
+        assertThrows(ServiceException.class,
+                () -> benefitEventService.saveEvent(null, eventInput, "integration-test"));
+        eventInput.put("feeAmount", new BigDecimal("168.50"));
         Map<String, Object> firstEvent = benefitEventService.saveEvent(null, eventInput, "integration-test");
         Long firstEventId = ((Number) firstEvent.get("eventId")).longValue();
 
@@ -283,6 +287,9 @@ class XyBusinessFlowIntegrationTest
         jdbc.update("update xy_member set mobile_verified_at=now() where member_id=?", memberId);
         Map<String, Object> firstBooking = benefitEventService.createBookingPayment(memberId, firstEventId, bookingInput);
         assertEquals(true, firstBooking.get("paid"));
+        assertEquals(new BigDecimal("168.50"), jdbc.queryForObject(
+                "select amount from xy_payment where business_type='BENEFIT_EVENT' and business_id=(select booking_id from xy_benefit_booking where booking_no=?)",
+                BigDecimal.class, firstBooking.get("bookingNo")));
         assertEquals("BOOKED", jdbc.queryForObject(
                 "select status from xy_benefit_booking where booking_no=?", String.class, firstBooking.get("bookingNo")));
         Map<String, Object> publicEvent = benefitEventService.publicEvent(firstEventId, memberId);
@@ -295,6 +302,10 @@ class XyBusinessFlowIntegrationTest
         assertThrows(ServiceException.class,
                 () -> benefitEventService.saveEvent(firstEventId, eventInput, "integration-test"));
         eventInput.put("announcement", "测试奖品：第一名礼品一份。人数不限，商家确认后正常开始。");
+        eventInput.put("feeAmount", new BigDecimal("188.00"));
+        assertThrows(ServiceException.class,
+                () -> benefitEventService.saveEvent(firstEventId, eventInput, "integration-test"));
+        eventInput.put("feeAmount", new BigDecimal("168.50"));
         jdbc.update("update xy_benefit_event set announcement='数据库中的后续公告' where event_id=?", firstEventId);
         assertEquals(eventInput.get("announcement"), benefitEventService.memberBookings(memberId).stream()
                 .filter(row -> firstBooking.get("bookingNo").equals(row.get("bookingNo")))
@@ -341,10 +352,10 @@ class XyBusinessFlowIntegrationTest
         Long lateBookingId = jdbc.queryForObject("select last_insert_id()", Long.class);
         String latePaymentNo = "LATEP" + suffix.substring(0, 20);
         jdbc.update("insert into xy_payment(payment_no,member_id,business_type,business_id,amount,channel,status) "
-                        + "values(?,?, 'BENEFIT_EVENT',?,100.00,'WECHAT','CLOSED')",
+                        + "values(?,?, 'BENEFIT_EVENT',?,168.50,'WECHAT','CLOSED')",
                 latePaymentNo, memberId, lateBookingId);
         assertEquals(true, benefitEventService.completeWechatPaymentIfApplicable(
-                latePaymentNo, "WX-LATE-" + suffix.substring(0, 12), 10000));
+                latePaymentNo, "WX-LATE-" + suffix.substring(0, 12), 16850));
         assertEquals("REFUNDING", jdbc.queryForObject(
                 "select status from xy_payment where payment_no=?", String.class, latePaymentNo));
         assertEquals("REFUNDING", jdbc.queryForObject(

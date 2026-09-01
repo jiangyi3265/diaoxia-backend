@@ -36,7 +36,8 @@ public class XyBenefitEventService
     private static final LocalTime START_TIME = LocalTime.of(20, 15);
     private static final LocalTime END_TIME = LocalTime.of(22, 15);
     private static final LocalTime SIGNUP_DEADLINE = LocalTime.of(19, 30);
-    private static final BigDecimal FEE = new BigDecimal("100.00");
+    private static final BigDecimal MIN_FEE = new BigDecimal("0.01");
+    private static final BigDecimal MAX_FEE = new BigDecimal("9999.99");
     private static final int SEAT_COUNT = 22;
     private static final int HOLD_MINUTES = 5;
     private static final DateTimeFormatter NO_TIME = DateTimeFormatter.ofPattern("yyyyMMddHHmmssSSS");
@@ -164,7 +165,7 @@ public class XyBenefitEventService
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(
                 "select b.booking_no as bookingNo,b.seat_no as seatNo,b.status,e.event_date as eventDate,"
                         + "date_format(e.start_time,'%H:%i') as startTime,date_format(e.end_time,'%H:%i') as endTime,"
-                        + "e.status as eventStatus,b.announcement_snapshot as announcement,"
+                        + "e.fee_amount as feeAmount,e.status as eventStatus,b.announcement_snapshot as announcement,"
                         + "b.announcement_version as announcementVersion,st.store_name as storeName,st.address,st.phone "
                         + "from xy_benefit_booking b join xy_benefit_event e on e.event_id=b.event_id "
                         + "join xy_store st on st.store_id=e.store_id where b.member_id=? "
@@ -209,6 +210,8 @@ public class XyBenefitEventService
         int announcementVersion = intValue(body.get("announcementVersion"), "公告版本缺失，请刷新后重试");
         if (announcementVersion != ((Number) event.get("announcement_version")).intValue())
             throw new ServiceException("公告内容已更新，请重新阅读并确认");
+        BigDecimal feeAmount = feeAmount(event.get("fee_amount"));
+        int totalFen = cents(feeAmount);
 
         List<Map<String, Object>> existing = jdbcTemplate.queryForList(
                 "select b.booking_id,b.booking_no,b.seat_no,b.status,b.expires_time,b.payment_payload "
@@ -253,18 +256,18 @@ public class XyBenefitEventService
             throw new ServiceException("福利钓专场当前未开放微信支付");
         jdbcTemplate.update(
                 "insert into xy_payment(payment_no,member_id,business_type,business_id,amount,channel) values(?,?,?,?,?,?)",
-                paymentNo, memberId, "BENEFIT_EVENT", bookingId, FEE, channel);
+                paymentNo, memberId, "BENEFIT_EVENT", bookingId, feeAmount, channel);
 
         Map<String, Object> result = new LinkedHashMap<>();
         if (payService.isDemoEnabled())
         {
-            completeBenefitPayment(paymentNo, "DEMO-" + nextNo("TX"), 10000, null);
+            completeBenefitPayment(paymentNo, "DEMO-" + nextNo("TX"), totalFen, null);
             result.put("demoPayment", true);
             result.put("paid", true);
         }
         else
         {
-            Map<String, Object> payload = payService.jsapi(paymentNo, string(member.get("openid")), 10000,
+            Map<String, Object> payload = payService.jsapi(paymentNo, string(member.get("openid")), totalFen,
                     "福利钓专场 " + eventDate, expiresTime.toLocalDateTime());
             result.putAll(payload);
             try
@@ -277,6 +280,7 @@ public class XyBenefitEventService
         result.put("bookingNo", bookingNo);
         result.put("eventId", eventId);
         result.put("seatNo", seatNo);
+        result.put("feeAmount", feeAmount);
         result.put("holdMinutes", HOLD_MINUTES);
         return result;
     }
@@ -434,6 +438,7 @@ public class XyBenefitEventService
         String announcement = string(body.get("announcement")).trim();
         if (announcement.length() < 10 || announcement.length() > 2000)
             throw new ServiceException("公告需填写10至2000个字，包含奖品及开闭场条件");
+        BigDecimal feeAmount = feeAmount(body.get("feeAmount"));
         String requestedStatus = "OPEN".equalsIgnoreCase(string(body.get("status"))) ? "OPEN" : "DRAFT";
 
         if (eventId == null)
@@ -443,8 +448,8 @@ public class XyBenefitEventService
                 jdbcTemplate.update(
                         "insert into xy_benefit_event(event_no,store_id,event_date,start_time,end_time,signup_deadline,"
                                 + "fee_amount,announcement,status,create_by,update_by) values(?,?,?,'20:15:00','22:15:00',"
-                                + "'19:30:00',100.00,?,?,?,?)",
-                        nextNo("FE"), storeId, date, announcement, requestedStatus, operator, operator);
+                                + "'19:30:00',?,?,?,?,?)",
+                        nextNo("FE"), storeId, date, feeAmount, announcement, requestedStatus, operator, operator);
             }
             catch (DuplicateKeyException ex) { throw new ServiceException("该门店当天已经创建福利钓专场"); }
             eventId = jdbcTemplate.queryForObject("select last_insert_id()", Long.class);
@@ -452,26 +457,28 @@ public class XyBenefitEventService
         else
         {
             List<Map<String, Object>> rows = jdbcTemplate.queryForList(
-                    "select event_id,store_id,event_date,announcement,status from xy_benefit_event where event_id=? for update", eventId);
+                    "select event_id,store_id,event_date,fee_amount,announcement,status from xy_benefit_event where event_id=? for update", eventId);
             if (rows.isEmpty()) throw new ServiceException("福利钓专场不存在");
             Map<String, Object> current = rows.get(0);
             String oldStatus = string(current.get("status"));
             if ("CANCELED".equals(oldStatus) || "FINISHED".equals(oldStatus))
                 throw new ServiceException("已取消或已结束的场次不能修改");
-            boolean changed = !Objects.equals(announcement, string(current.get("announcement")));
+            boolean announcementChanged = !Objects.equals(announcement, string(current.get("announcement")));
+            boolean feeChanged = feeAmount.compareTo(feeAmount(current.get("fee_amount"))) != 0;
+            boolean termsChanged = announcementChanged || feeChanged;
             String nextStatus = "CONFIRMED".equals(oldStatus) ? oldStatus : requestedStatus;
             Integer activeBookings = jdbcTemplate.queryForObject(
                     "select count(1) from xy_benefit_booking where event_id=? and seat_lock=1", Integer.class, eventId);
             boolean materialChanged = ((Number) current.get("store_id")).longValue() != storeId.longValue()
-                    || !date.equals(asDate(current.get("event_date"))) || changed || !oldStatus.equals(nextStatus);
+                    || !date.equals(asDate(current.get("event_date"))) || termsChanged || !oldStatus.equals(nextStatus);
             if (activeBookings != null && activeBookings > 0 && materialChanged)
-                throw new ServiceException("已有报名或待支付记录，不能修改门店、日期、公告或开放状态");
+                throw new ServiceException("已有报名或待支付记录，不能修改门店、日期、报名费、公告或开放状态");
             try
             {
                 jdbcTemplate.update(
-                        "update xy_benefit_event set store_id=?,event_date=?,announcement=?,"
+                        "update xy_benefit_event set store_id=?,event_date=?,fee_amount=?,announcement=?,"
                                 + "announcement_version=announcement_version+?,status=?,update_by=? where event_id=?",
-                        storeId, date, announcement, changed ? 1 : 0,
+                        storeId, date, feeAmount, announcement, termsChanged ? 1 : 0,
                         nextStatus, operator, eventId);
             }
             catch (DuplicateKeyException ex) { throw new ServiceException("该门店当天已经创建福利钓专场"); }
@@ -848,6 +855,18 @@ public class XyBenefitEventService
     {
         try { return new BigDecimal(string(value)).setScale(2, RoundingMode.UNNECESSARY).movePointRight(2).intValueExact(); }
         catch (Exception ex) { throw new ServiceException("金额格式不合法"); }
+    }
+    private BigDecimal feeAmount(Object value)
+    {
+        try
+        {
+            BigDecimal amount = new BigDecimal(string(value)).setScale(2, RoundingMode.UNNECESSARY);
+            if (amount.compareTo(MIN_FEE) < 0 || amount.compareTo(MAX_FEE) > 0)
+                throw new ServiceException("报名费必须在0.01至9999.99元之间");
+            return amount;
+        }
+        catch (ServiceException ex) { throw ex; }
+        catch (Exception ex) { throw new ServiceException("请填写正确的报名费，最多保留两位小数"); }
     }
     private LocalDate asDate(Object value)
     {
