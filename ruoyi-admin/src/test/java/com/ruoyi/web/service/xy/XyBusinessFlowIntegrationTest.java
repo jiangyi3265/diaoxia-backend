@@ -7,6 +7,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -42,6 +44,7 @@ import com.ruoyi.web.domain.xy.XyFinanceExportRow;
 class XyBusinessFlowIntegrationTest
 {
     private static final String MEMBER_TOKEN_PREFIX = "xy:member:token:";
+    private static final ZoneId CHINA_ZONE = ZoneId.of("Asia/Shanghai");
 
     @Autowired
     private XyBusinessService service;
@@ -394,9 +397,9 @@ class XyBusinessFlowIntegrationTest
                 + "\"signType\":\"RSA\",\"paySign\":\"signature\"}";
         jdbc.update("insert into xy_benefit_booking(booking_no,event_id,member_id,seat_no,announcement_version,"
                         + "announcement_snapshot,announcement_confirmed_time,payment_payload,expires_time) "
-                        + "values(?,?,?,?,?,?,now(),?,date_add(now(),interval 5 minute))",
+                        + "values(?,?,?,?,?,?,now(),?,?)",
                 bookingNo, eventId, memberId, 8, event.get("announcementVersion"),
-                eventInput.get("announcement"), paymentPayload);
+                eventInput.get("announcement"), paymentPayload, LocalDateTime.now(CHINA_ZONE).plusMinutes(5));
         Long bookingId = jdbc.queryForObject("select last_insert_id()", Long.class);
         jdbc.update("insert into xy_payment(payment_no,member_id,business_type,business_id,amount,channel,status) "
                         + "values(?,?, 'BENEFIT_EVENT',?,99.00,'WECHAT','PENDING')",
@@ -421,8 +424,8 @@ class XyBusinessFlowIntegrationTest
 
         assertThrows(ServiceException.class,
                 () -> benefitEventService.continueBookingPayment(otherMemberId, bookingNo));
-        jdbc.update("update xy_benefit_booking set expires_time=date_sub(now(),interval 1 second) where booking_id=?",
-                bookingId);
+        jdbc.update("update xy_benefit_booking set expires_time=? where booking_id=?",
+                LocalDateTime.now(CHINA_ZONE).minusSeconds(1), bookingId);
         assertThrows(ServiceException.class,
                 () -> benefitEventService.continueBookingPayment(memberId, bookingNo));
 
