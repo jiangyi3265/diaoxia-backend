@@ -569,5 +569,24 @@ class XyBusinessFlowIntegrationTest
                 "select count(1) from xy_payment where payment_no=?", Integer.class, paymentNo));
         assertEquals(1, jdbc.queryForObject(
                 "select count(1) from xy_benefit_refund where booking_id=?", Integer.class, bookingId));
+
+        Map<String, Object> replacementEvent = benefitEventService.saveEvent(null, eventInput, "integration-test");
+        Long replacementEventId = ((Number) replacementEvent.get("eventId")).longValue();
+        assertTrue(!eventId.equals(replacementEventId));
+        assertEquals("OPEN", replacementEvent.get("status"));
+        assertEquals("DELETED", jdbc.queryForObject(
+                "select status from xy_benefit_event where event_id=?", String.class, eventId));
+        assertEquals(1, jdbc.queryForObject(
+                "select count(1) from xy_benefit_event where event_id=? and store_id=? and event_date=?",
+                Integer.class, replacementEventId, storeId, LocalDate.parse(String.valueOf(eventInput.get("eventDate")))));
+        assertEquals(1, jdbc.queryForObject(
+                "select count(1) from xy_benefit_booking b "
+                        + "join xy_payment p on p.business_type='BENEFIT_EVENT' and p.business_id=b.booking_id "
+                        + "join xy_benefit_refund r on r.booking_id=b.booking_id "
+                        + "where b.booking_id=? and b.event_id=? and p.payment_no=? and p.status='REFUNDED' "
+                        + "and r.status='SUCCESS'",
+                Integer.class, bookingId, eventId, paymentNo));
+        assertEquals(0, jdbc.queryForObject(
+                "select count(1) from xy_benefit_booking where event_id=?", Integer.class, replacementEventId));
     }
 }

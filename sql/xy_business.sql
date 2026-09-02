@@ -406,6 +406,9 @@ CREATE TABLE IF NOT EXISTS xy_benefit_event (
   announcement TEXT NOT NULL COMMENT '公告、奖品与开闭场条件',
   announcement_version INT NOT NULL DEFAULT 1 COMMENT '公告版本',
   status VARCHAR(16) NOT NULL DEFAULT 'DRAFT' COMMENT '状态：DRAFT/OPEN/CONFIRMED/CANCELED/FINISHED/DELETED',
+  active_event_date DATE GENERATED ALWAYS AS (
+    CASE WHEN status = 'DELETED' THEN NULL ELSE event_date END
+  ) STORED COMMENT '未删除场次日期，用于释放已删除场次的日期占用',
   confirmed_time DATETIME DEFAULT NULL,
   canceled_time DATETIME DEFAULT NULL,
   cancel_reason VARCHAR(500) DEFAULT NULL,
@@ -415,7 +418,7 @@ CREATE TABLE IF NOT EXISTS xy_benefit_event (
   update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (event_id),
   UNIQUE KEY uk_xy_benefit_event_no (event_no),
-  UNIQUE KEY uk_xy_benefit_event_store_date (store_id, event_date),
+  UNIQUE KEY uk_xy_benefit_event_active_store_date (store_id, active_event_date),
   KEY idx_xy_benefit_event_date_status (event_date, status),
   CONSTRAINT fk_xy_benefit_event_store FOREIGN KEY (store_id) REFERENCES xy_store(store_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='福利钓专场';
