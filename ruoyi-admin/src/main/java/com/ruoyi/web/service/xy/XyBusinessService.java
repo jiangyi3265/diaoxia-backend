@@ -24,6 +24,7 @@ import com.ruoyi.common.core.redis.RedisCache;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.common.utils.StringUtils;
 import com.ruoyi.web.domain.xy.XyFinanceExportRow;
+import com.ruoyi.web.domain.xy.XyMemberExportRow;
 
 /**
  * 钓虾核心业务服务。
@@ -1079,11 +1080,58 @@ public class XyBusinessService
 
     public List<Map<String, Object>> adminMembers(String keyword)
     {
-        String sql = "select m.member_id as memberId, m.nickname, m.mobile, m.invite_code as inviteCode, m.status as memberStatus, m.create_time as createTime, c.card_id as cardId, c.card_no as cardNo, c.start_date as startDate, c.expire_date as expireDate, case when c.card_id is null then 'NONE' when c.status<>'ACTIVE' then c.status when c.expire_date<curdate() then 'EXPIRED' when c.start_date>curdate() then 'PENDING' else 'ACTIVE' end as cardStatus, inviter.nickname as inviterNickname, inviter.invite_code as inviterInviteCode from xy_member m left join xy_member inviter on inviter.member_id=m.inviter_member_id left join xy_membership_card c on c.card_id=(select c2.card_id from xy_membership_card c2 where c2.member_id=m.member_id order by c2.expire_date desc limit 1) where 1=1";
+        StringBuilder sql = new StringBuilder("select m.member_id as memberId, m.nickname, m.mobile, m.invite_code as inviteCode, m.status as memberStatus, m.create_time as createTime, c.card_id as cardId, c.card_no as cardNo, c.start_date as startDate, c.expire_date as expireDate, case when c.card_id is null then 'NONE' when c.status<>'ACTIVE' then c.status when c.expire_date<curdate() then 'EXPIRED' when c.start_date>curdate() then 'PENDING' else 'ACTIVE' end as cardStatus, inviter.nickname as inviterNickname, inviter.invite_code as inviterInviteCode from xy_member m left join xy_member inviter on inviter.member_id=m.inviter_member_id left join xy_membership_card c on c.card_id=(select c2.card_id from xy_membership_card c2 where c2.member_id=m.member_id order by c2.expire_date desc, c2.card_id desc limit 1) where 1=1");
         List<Object> args = new ArrayList<>();
-        if (StringUtils.isNotEmpty(keyword)) { sql += " and (m.nickname like ? or m.mobile like ? or m.invite_code like ?)"; args.add("%" + keyword + "%"); args.add("%" + keyword + "%"); args.add("%" + keyword + "%"); }
-        sql += " order by m.create_time desc";
-        return jdbcTemplate.queryForList(sql, args.toArray());
+        appendMemberKeywordFilter(sql, args, keyword);
+        sql.append(" order by m.create_time desc, m.member_id desc");
+        return jdbcTemplate.queryForList(sql.toString(), args.toArray());
+    }
+
+    public List<XyMemberExportRow> memberExportRows(String keyword)
+    {
+        StringBuilder sql = new StringBuilder(
+                "select cast(m.member_id as char) as member_id,m.nickname,m.mobile,m.invite_code,c.card_no,"
+                        + "date_format(c.start_date,'%Y-%m-%d') as start_date,date_format(c.expire_date,'%Y-%m-%d') as expire_date,"
+                        + "case when c.card_id is null then '未开通' when c.status='REFUNDED' then '已退款' "
+                        + "when c.status='PENDING' then '未生效' when c.status='EXPIRED' then '已到期' "
+                        + "when c.status in ('INACTIVE','1') then '已失效' when c.status not in ('ACTIVE','VALID','0') then concat('未知（',c.status,'）') "
+                        + "when c.expire_date<curdate() then '已到期' when c.start_date>curdate() then '未生效' else '有效' end as card_status,"
+                        + "case when m.status='0' then '正常' else '停用' end as member_status,"
+                        + "inviter.nickname as inviter_nickname,inviter.invite_code as inviter_invite_code,"
+                        + "date_format(m.create_time,'%Y-%m-%d %H:%i:%s') as create_time "
+                        + "from xy_member m left join xy_member inviter on inviter.member_id=m.inviter_member_id "
+                        + "left join xy_membership_card c on c.card_id=(select c2.card_id from xy_membership_card c2 "
+                        + "where c2.member_id=m.member_id order by c2.expire_date desc,c2.card_id desc limit 1) where 1=1");
+        List<Object> args = new ArrayList<>();
+        appendMemberKeywordFilter(sql, args, keyword);
+        sql.append(" order by m.create_time desc,m.member_id desc");
+        return jdbcTemplate.query(sql.toString(), (rs, rowNum) -> {
+            XyMemberExportRow row = new XyMemberExportRow();
+            row.setMemberId(rs.getString("member_id"));
+            row.setNickname(rs.getString("nickname"));
+            row.setMobile(rs.getString("mobile"));
+            row.setInviteCode(rs.getString("invite_code"));
+            row.setCardNo(rs.getString("card_no"));
+            row.setStartDate(rs.getString("start_date"));
+            row.setExpireDate(rs.getString("expire_date"));
+            row.setCardStatus(rs.getString("card_status"));
+            row.setMemberStatus(rs.getString("member_status"));
+            row.setInviterNickname(rs.getString("inviter_nickname"));
+            row.setInviterInviteCode(rs.getString("inviter_invite_code"));
+            row.setCreateTime(rs.getString("create_time"));
+            return row;
+        }, args.toArray());
+    }
+
+    private void appendMemberKeywordFilter(StringBuilder sql, List<Object> args, String keyword)
+    {
+        String normalizedKeyword = StringUtils.trim(keyword);
+        if (StringUtils.isEmpty(normalizedKeyword)) return;
+        String likeKeyword = "%" + normalizedKeyword + "%";
+        sql.append(" and (m.nickname like ? or m.mobile like ? or m.invite_code like ?)");
+        args.add(likeKeyword);
+        args.add(likeKeyword);
+        args.add(likeKeyword);
     }
 
     @Transactional

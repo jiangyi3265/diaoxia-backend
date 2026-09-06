@@ -19,6 +19,7 @@ import com.ruoyi.common.enums.BusinessType;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.common.utils.poi.ExcelUtil;
 import com.ruoyi.web.domain.xy.XyFinanceExportRow;
+import com.ruoyi.web.domain.xy.XyMemberExportRow;
 import com.ruoyi.web.service.xy.XyBusinessService;
 import com.ruoyi.web.service.xy.XyWechatPayService;
 import com.ruoyi.web.service.xy.XyBenefitEventService;
@@ -45,6 +46,16 @@ public class XyAdminController
 
     @PreAuthorize("@ss.hasPermi('xy:member:list')")
     @GetMapping("/members") public AjaxResult members(@RequestParam(required = false) String keyword) { return AjaxResult.success(service.adminMembers(keyword)); }
+
+    @Log(title = "会员管理", businessType = BusinessType.EXPORT,
+            isSaveRequestData = false, isSaveResponseData = false)
+    @PreAuthorize("@ss.hasPermi('xy:member:export')")
+    @PostMapping("/members/export")
+    public void exportMembers(HttpServletResponse response, @RequestParam(required = false) String keyword)
+    {
+        new ExcelUtil<XyMemberExportRow>(XyMemberExportRow.class)
+                .exportExcel(response, service.memberExportRows(keyword), "会员名单");
+    }
 
     @PreAuthorize("@ss.hasPermi('xy:member:list')")
     @GetMapping("/members/plans") public AjaxResult membershipPlans() { return AjaxResult.success(service.adminMembershipPlans()); }

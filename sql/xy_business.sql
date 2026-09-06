@@ -521,10 +521,12 @@ FROM (
   UNION ALL SELECT 10015, '会员资料维护', 10002, 'xy:member:edit'
   UNION ALL SELECT 10016, '福利钓维护', 10009, 'xy:benefit:edit'
   UNION ALL SELECT 10017, '福利钓资金处理', 10009, 'xy:benefit:refund'
+  UNION ALL SELECT 10018, '会员数据导出', 10002, 'xy:member:export'
 ) AS permissions
 WHERE NOT EXISTS (SELECT 1 FROM sys_menu existing_menu WHERE existing_menu.menu_id = permissions.menu_id);
 
 INSERT INTO sys_role_menu (role_id, menu_id)
 SELECT 1, menu.menu_id FROM sys_menu menu
-WHERE menu.menu_id BETWEEN 10000 AND 10017
+WHERE (menu.menu_id BETWEEN 10000 AND 10017
+       OR (menu.menu_id = 10018 AND menu.perms = 'xy:member:export'))
   AND NOT EXISTS (SELECT 1 FROM sys_role_menu role_menu WHERE role_menu.role_id = 1 AND role_menu.menu_id = menu.menu_id);

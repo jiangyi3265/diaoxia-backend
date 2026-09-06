@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.ByteArrayInputStream;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -14,6 +15,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import org.apache.poi.ss.usermodel.CellType;
+import org.apache.poi.ss.usermodel.Row;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
@@ -27,6 +31,7 @@ import com.ruoyi.common.core.redis.RedisCache;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.common.utils.poi.ExcelUtil;
 import com.ruoyi.web.domain.xy.XyFinanceExportRow;
+import com.ruoyi.web.domain.xy.XyMemberExportRow;
 
 /**
  * 商城、预约、会员和核销的真实数据库/Redis集成测试。
@@ -212,6 +217,87 @@ class XyBusinessFlowIntegrationTest
         service.deleteAdminMember(manualMemberId);
         assertEquals(0, jdbc.queryForObject("select count(1) from xy_member where member_id=?", Integer.class, manualMemberId));
         assertThrows(ServiceException.class, () -> service.deleteAdminMember(memberId));
+    }
+
+    @Test
+    void memberExcelExportKeepsIdentifiersAsTextAndUsesCurrentKeyword() throws Exception
+    {
+        String suffix = UUID.randomUUID().toString().replace("-", "");
+        long numericSeed = Integer.toUnsignedLong(suffix.hashCode());
+        String numericSuffix = String.format("%010d", numericSeed);
+        String inviterCode = "99" + numericSuffix;
+        String inviteCode = "00" + numericSuffix;
+        String mobile = "139" + String.format("%08d", numericSeed % 100000000L);
+        String cardNo = "0001234567890" + numericSuffix;
+
+        jdbc.update("insert into xy_member(openid,invite_code,nickname,status) values(?,?,?,'0')",
+                "export_inviter_" + suffix, inviterCode, "邀请人" + suffix.substring(0, 6));
+        Long inviterId = jdbc.queryForObject("select last_insert_id()", Long.class);
+        jdbc.update("insert into xy_member(openid,invite_code,nickname,mobile,status,inviter_member_id) values(?,?,?,?,?,?)",
+                "export_member_" + suffix, inviteCode, "=1+1", mobile, "1", inviterId);
+        Long memberId = jdbc.queryForObject("select last_insert_id()", Long.class);
+        jdbc.update("insert into xy_membership_plan(plan_name,amount,duration_days,daily_reservation_limit) values(?,?,?,?)",
+                "导出测试套餐" + suffix.substring(0, 6), new BigDecimal("88.00"), 30, 1);
+        Long planId = jdbc.queryForObject("select last_insert_id()", Long.class);
+        jdbc.update("insert into xy_membership_card(member_id,plan_id,card_no,start_date,expire_date) values(?,?,?,?,?)",
+                memberId, planId, cardNo, LocalDate.now().minusDays(1), LocalDate.now().plusDays(29));
+
+        List<XyMemberExportRow> rows = service.memberExportRows("  " + inviteCode + "  ");
+        assertEquals(1, rows.size());
+        XyMemberExportRow exported = rows.get(0);
+        assertEquals(String.valueOf(memberId), exported.getMemberId());
+        assertEquals(mobile, exported.getMobile());
+        assertEquals(inviteCode, exported.getInviteCode());
+        assertEquals(cardNo, exported.getCardNo());
+        assertEquals("有效", exported.getCardStatus());
+        assertEquals("停用", exported.getMemberStatus());
+        assertEquals(inviterCode, exported.getInviterInviteCode());
+
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        new ExcelUtil<XyMemberExportRow>(XyMemberExportRow.class)
+                .exportExcel(response, rows, "会员名单");
+        byte[] workbookBytes = response.getContentAsByteArray();
+        assertTrue(workbookBytes.length > 2);
+        assertEquals((byte) 'P', workbookBytes[0]);
+        assertEquals((byte) 'K', workbookBytes[1]);
+        try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(workbookBytes)))
+        {
+            Row header = workbook.getSheetAt(0).getRow(0);
+            Row data = workbook.getSheetAt(0).getRow(1);
+            assertEquals("会员ID", header.getCell(0).getStringCellValue());
+            assertEquals("手机号", header.getCell(2).getStringCellValue());
+            assertEquals("邀请码", header.getCell(3).getStringCellValue());
+            assertEquals("会员卡号", header.getCell(4).getStringCellValue());
+            assertEquals(CellType.STRING, data.getCell(0).getCellType());
+            assertEquals(CellType.STRING, data.getCell(2).getCellType());
+            assertEquals(CellType.STRING, data.getCell(3).getCellType());
+            assertEquals(CellType.STRING, data.getCell(4).getCellType());
+            assertEquals(CellType.STRING, data.getCell(10).getCellType());
+            assertEquals(String.valueOf(memberId), data.getCell(0).getStringCellValue());
+            assertEquals("\t=1+1", data.getCell(1).getStringCellValue());
+            assertEquals(mobile, data.getCell(2).getStringCellValue());
+            assertEquals(inviteCode, data.getCell(3).getStringCellValue());
+            assertEquals(cardNo, data.getCell(4).getStringCellValue());
+            assertEquals(inviterCode, data.getCell(10).getStringCellValue());
+        }
+
+        assertEquals("未开通", service.memberExportRows(inviterCode).get(0).getCardStatus());
+        jdbc.update("update xy_membership_card set status='PENDING' where member_id=?", memberId);
+        assertEquals("未生效", service.memberExportRows(inviteCode).get(0).getCardStatus());
+        jdbc.update("update xy_membership_card set status='EXPIRED' where member_id=?", memberId);
+        assertEquals("已到期", service.memberExportRows(inviteCode).get(0).getCardStatus());
+        jdbc.update("update xy_membership_card set status='REFUNDED' where member_id=?", memberId);
+        assertEquals("已退款", service.memberExportRows(inviteCode).get(0).getCardStatus());
+        jdbc.update("update xy_membership_card set status='UNKNOWN_TEST' where member_id=?", memberId);
+        assertEquals("未知（UNKNOWN_TEST）", service.memberExportRows(inviteCode).get(0).getCardStatus());
+
+        MockHttpServletResponse emptyResponse = new MockHttpServletResponse();
+        new ExcelUtil<XyMemberExportRow>(XyMemberExportRow.class)
+                .exportExcel(emptyResponse, service.memberExportRows("not-found-" + suffix), "会员名单");
+        try (XSSFWorkbook workbook = new XSSFWorkbook(new ByteArrayInputStream(emptyResponse.getContentAsByteArray())))
+        {
+            assertEquals(1, workbook.getSheetAt(0).getPhysicalNumberOfRows());
+        }
     }
 
     @Test
